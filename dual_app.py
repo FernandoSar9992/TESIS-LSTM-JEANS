@@ -112,7 +112,33 @@ if results:
             vrows.append({"Modalidad": name, **line.to_dict()})
     if vrows:
         st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-    st.caption("No selecciones parámetros mirando TEST. La validación se usa para selección y no es independiente.")
+    st.caption("La validación se utiliza para seleccionar configuración. No constituye prueba independiente.")
+    with st.expander("Comparar LSTM con modelos de referencia (VALIDACIÓN)", expanded=True):
+        for name, result in results.items():
+            st.markdown(f"**{name}**")
+            val = result["split_metrics"]
+            val = val.loc[val.Grupo == "VALIDATION"].copy()
+            if not val.empty:
+                cols = [c for c in ["Modelo", "Alcance", "N", "MAE", "RMSE", "R2", "Sesgo"] if c in val.columns]
+                st.dataframe(val[cols].sort_values(["RMSE", "MAE"]).round(3),
+                             hide_index=True, use_container_width=True)
+                lstm = val.loc[val.Modelo == "LSTM"].iloc[0]
+                best = val.sort_values(["RMSE", "MAE"]).iloc[0]
+                if best.Modelo != "LSTM":
+                    st.info(f"En {name}, el menor RMSE de validación corresponde a "
+                            f"{best.Modelo} ({best.RMSE:.2f}), frente a "
+                            f"{lstm.RMSE:.2f} de LSTM. Conviene estudiar esta diferencia.")
+            detail = result.get("validation_detail")
+            if isinstance(detail, pd.DataFrame) and not detail.empty:
+                chart_cols = [c for c in ["Real", "LSTM", "Naive", "Ridge", "Naive estacional"]
+                              if c in detail.columns]
+                graph = detail.melt(id_vars=["Periodo"], value_vars=chart_cols,
+                                    var_name="Modelo", value_name="Pantalones")
+                st.plotly_chart(px.line(graph, x="Periodo", y="Pantalones", color="Modelo",
+                                        markers=True, title=f"Valores y pronósticos: {name}"),
+                                use_container_width=True)
+    st.caption("No ajustes el modelo utilizando TEST. La diferencia entre modalidades "
+               "puede reflejarse en el número de períodos y su cobertura documental.")
 
     if not st.session_state.get("dual_finalized"):
         if st.session_state.get("dual_test_locked"):

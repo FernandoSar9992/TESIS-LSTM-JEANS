@@ -27,52 +27,66 @@ CORTE_ORIGINS = {
 
 
 def prepare_dual(frame: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Una fila por período compartido, sin inventar ceros ni cambiar la demanda."""
+    """Prepara el historial completo de cada modalidad.
+
+    Maquila abarca todo el archivo histórico; corte propio solo comienza
+    donde aparece su primera actividad. Antes de comenzar corte propio,
+    la ausencia de demanda NO se trata como una demanda real igual a cero.
+    """
     missing = [col for col in REQUIRED if col not in frame.columns]
     if missing:
         raise ValueError("Faltan columnas de la base dual: " + ", ".join(missing))
-    raw = frame.loc[frame["Bloque temporal"].astype(str).str.upper().str.strip().isin(
-        {"TRAIN", "VALIDACIÓN", "VALIDACION", "PRUEBA", "TEST"})].copy()
-    if len(raw) < 40:
-        raise ValueError("La base común tiene menos de 40 períodos de entrenamiento/evaluación.")
-    labels = raw[PERIOD].astype(str).str.strip().reset_index(drop=True)
-    positions = period_positions(labels)
-    if positions is None or not np.all(np.diff(positions) == 1):
-        raise ValueError("Los períodos deben ser consecutivos en el calendario de 48 períodos/año.")
-    if labels.duplicated().any():
-        raise ValueError("Existen períodos duplicados.")
-    total = pd.to_numeric(raw["DEMANDA TOTAL LSTM"], errors="coerce").to_numpy(float)
+    blocks = frame["Bloque temporal"].fillna("").astype(str).str.upper().str.strip()
+    historical = blocks.isin({
+        "ANTERIOR AL PERIODO COMUN", "TRAIN", "VALIDACIÓN", "VALIDACION", "PRUEBA", "TEST"
+    })
+    all_history = frame.loc[historical].copy()
+    cut_origins = all_history[SOURCE["Corte propio"]].fillna("").astype(str).str.upper().str.strip()
+    # Incluye Mayo 2024-Se4: tiene demanda propia aunque está fuera del
+    # período conjunto usado por la versión anterior.
+    own_history = all_history.loc[cut_origins.isin(CORTE_ORIGINS)].copy()
+    if own_history.empty:
+        raise ValueError("No hay períodos identificados de actividad de corte propio.")
+    subsets = {"Maquila": all_history, "Corte propio": own_history}
     results = {}
-    values = []
-    for name in TARGETS:
-        demand = pd.to_numeric(raw[TARGETS[name]], errors="coerce").to_numpy(float)
+    for name, selected in subsets.items():
+        if len(selected) < 40:
+            raise ValueError(f"{name}: menos de 40 períodos históricos disponibles.")
+        labels = selected[PERIOD].astype(str).str.strip().reset_index(drop=True)
+        positions = period_positions(labels)
+        if positions is None or not np.all(np.diff(positions) == 1) or labels.duplicated().any():
+            raise ValueError(f"{name}: períodos duplicados, no reconocidos o no consecutivos.")
+        demand = pd.to_numeric(selected[TARGETS[name]], errors="coerce").to_numpy(float)
         if not np.isfinite(demand).all() or (demand < 0).any():
             raise ValueError(f"{name}: demanda vacía, infinita o negativa.")
-        sources = raw[SOURCE[name]].fillna("").astype(str).str.upper().str.strip().reset_index(drop=True)
+        sources = selected[SOURCE[name]].fillna("").astype(str).str.upper().str.strip().reset_index(drop=True)
         mapping = MAQUILA_ORIGINS if name == "Maquila" else CORTE_ORIGINS
         unexpected = set(sources.unique()) - set(mapping)
         if unexpected:
             raise ValueError(f"{name}: procedencia desconocida: {sorted(unexpected)}")
-        origin = sources.map(mapping)
-        if OBSERVED[name] in raw.columns:
-            observed = pd.to_numeric(raw[OBSERVED[name]], errors="coerce").reset_index(drop=True)
+        origins = sources.map(mapping)
+        if OBSERVED[name] in selected.columns:
+            original = pd.to_numeric(selected[OBSERVED[name]], errors="coerce").reset_index(drop=True)
         else:
-            observed = pd.Series(np.nan, index=range(len(raw)))
-        # El campo original solo documenta lo registrado; no sustituye la demanda reconstruida.
-        observed = observed.mask(origin.eq("IMPUTADO"))
+            original = pd.Series(np.nan, index=range(len(selected)))
+        original = original.mask(origins.eq("IMPUTADO"))
         results[name] = pd.DataFrame({
             "periodo": labels, "demanda": demand,
-            "origen": origin.to_numpy(),
-            "demanda_original": observed.to_numpy(),
+            "origen": origins.to_numpy(),
+            "demanda_original": original.to_numpy(),
             "tipo_estimacion": sources.to_numpy(),
         })
-        values.append(demand)
-    if not np.isfinite(total).all() or not np.allclose(values[0] + values[1], total, rtol=0, atol=1e-5):
-        raise ValueError("La demanda total no coincide con maquila + corte propio.")
-    if not results["Maquila"].periodo.equals(results["Corte propio"].periodo):
-        raise ValueError("Las modalidades no están alineadas en el tiempo.")
-    return results
 
+    # Comprobar el total histórico SOLO en fechas donde opera corte propio.
+    cuts = own_history
+    total = pd.to_numeric(cuts["DEMANDA TOTAL LSTM"], errors="coerce").to_numpy(float)
+    mq = pd.to_numeric(cuts[TARGETS["Maquila"]], errors="coerce").to_numpy(float)
+    ct = results["Corte propio"].demanda.to_numpy(float)
+    if not np.isfinite(total).all() or not np.allclose(mq + ct, total, rtol=0, atol=1e-5):
+        raise ValueError("La demanda total no coincide con maquila + corte propio.")
+    if results["Maquila"].periodo.iloc[-1] != results["Corte propio"].periodo.iloc[-1]:
+        raise ValueError("Las series no terminan en el mismo período: no se puede sumar el futuro.")
+    return results
 
 def combined_forecast(maquila: pd.DataFrame, corte: pd.DataFrame) -> pd.DataFrame:
     """Suma pronósticos independientes sin redondearlos antes del cálculo."""
@@ -99,8 +113,11 @@ def combined_test(maquila: pd.DataFrame, corte: pd.DataFrame):
         "Origen": "Origen_corte", "Demanda_real": "Real_corte",
         "Prediccion_LSTM": "Pred_corte"})
     out = a.merge(b, on="Periodo", how="inner", validate="one_to_one", sort=False)
-    if len(out) != len(a) or len(out) != len(b):
-        raise ValueError("Los períodos TEST no coinciden entre modalidades.")
+    # Los segmentos TEST comienzan en momentos diferentes porque los
+    # historiales tienen longitudes distintas. El total se evalúa únicamente
+    # en la intersección cronológica de ambos conjuntos TEST.
+    if len(out) < 2:
+        raise ValueError("Hay menos de dos períodos TEST compartidos entre modalidades.")
     out["Real_total"] = out["Real_maquila"] + out["Real_corte"]
     out["Pred_total"] = out["Pred_maquila"] + out["Pred_corte"]
     out["Error_total"] = out["Real_total"] - out["Pred_total"]

@@ -34,6 +34,33 @@ class DualModelTests(unittest.TestCase):
         self.assertEqual(result["Maquila"].origen.iloc[-1], "REAL")
         self.assertEqual(result["Corte propio"].origen.iloc[-1], "MIXTO")
 
+    def test_full_history_has_180_maquila_and_113_corte(self):
+        months = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+        original = sample()
+        prefix = []
+        for pos in range(2023 * 48, 2024 * 48 + 19):
+            year, within = divmod(pos, 48)
+            month, segment = divmod(within, 4)
+            prefix.append({
+                "Periodo (4/mes)": f"{months[month]} {year}-Se{segment+1}",
+                "Bloque temporal": "ANTERIOR AL PERIODO COMUN",
+                "DEMANDA MAQUILA LSTM": 100,
+                "Origen maquila": "SIMULADA",
+                "DEMANDA CORTE LSTM": 0,
+                "Origen corte": "NO OPERABA (previo 22-may-2024)",
+                "DEMANDA TOTAL LSTM": 100,
+            })
+        may4 = dict(prefix[-1])
+        may4.update({"Periodo (4/mes)": "Mayo 2024-Se4",
+                     "DEMANDA CORTE LSTM": 24, "Origen corte": "SOLO ESCENARIO",
+                     "DEMANDA TOTAL LSTM": 124})
+        full = pd.concat([pd.DataFrame(prefix), pd.DataFrame([may4]), original], ignore_index=True)
+        result = prepare_dual(full)
+        self.assertEqual(len(result["Maquila"]), 180)
+        self.assertEqual(len(result["Corte propio"]), 113)
+        self.assertEqual(result["Corte propio"].periodo.iloc[0], "Mayo 2024-Se4")
+
     def test_future_is_48_period_calendar(self):
         labels = future_labels(prepare_dual(sample())["Maquila"], 3)
         self.assertEqual(labels, ["Octubre 2026-Se1", "Octubre 2026-Se2", "Octubre 2026-Se3"])

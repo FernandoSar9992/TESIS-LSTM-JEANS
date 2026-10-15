@@ -32,29 +32,35 @@ except Exception as exc:
     st.stop()
 
 a, b = series["Maquila"], series["Corte propio"]
-n = len(a)
-st.success(f"Base alineada: {n} períodos desde {a.periodo.iloc[0]} hasta {a.periodo.iloc[-1]}.")
-c1, c2, c3 = st.columns(3)
-c1.metric("Maquila: objetivos simulados", int(a.origen.eq("IMPUTADO").sum()))
-c2.metric("Corte propio: objetivos mixtos", int(b.origen.eq("MIXTO").sum()))
-c3.metric("Ambas modalidades REAL", int((a.origen.eq("REAL") & b.origen.eq("REAL")).sum()))
-st.warning(
-    "La maquila histórica incluye escenarios reconstruidos y el corte propio mezcla ventas/pedidos "
-    "documentados con períodos incompletos. Un escenario puede servir para probar código y planificación, "
-    "pero NO acredita precisión predictiva sobre demanda real. "
-    "Los objetivos mixtos NO se contabilizan como observaciones totalmente reales."
-)
-
-with st.expander("Datos utilizados y trazabilidad", expanded=False):
-    preview = pd.DataFrame({
-        "Periodo": a.periodo, "Demanda maquila": a.demanda,
-        "Origen maquila": a.origen, "Demanda corte": b.demanda,
-        "Origen corte": b.origen, "Demanda total": a.demanda + b.demanda,
+common = a.merge(b, on="periodo", suffixes=("_maquila", "_corte"), how="inner", validate="one_to_one")
+st.success(f"Histórico cargado: {len(a)} períodos de maquila y {len(b)} de corte propio; "
+           f"{len(common)} períodos compartidos. Último: {a.periodo.iloc[-1]}.")
+st.subheader("Demanda histórica por modalidad")
+preview = pd.DataFrame({
+    "Período": a.periodo,
+    "Maquila": a.demanda,
+})
+own = b.rename(columns={"periodo": "Período", "demanda": "Corte propio"})[["Período", "Corte propio"]]
+preview = preview.merge(own, on="Período", how="left", validate="one_to_one")
+preview["Total"] = preview["Maquila"] + preview["Corte propio"].fillna(0)
+st.dataframe(preview, hide_index=True, use_container_width=True)
+st.caption("Las celdas vacías de corte propio corresponden a fechas anteriores al inicio de esa modalidad; "
+           "el total de esas fechas refleja solo maquila.")
+with st.expander("Calidad de los datos y notas metodológicas", expanded=False):
+    st.write("El histórico combina registros disponibles y períodos reconstruidos. Las métricas obtenidas "
+             "sobre esos períodos son descriptivas y no sustituyen una validación independiente con "
+             "ventas y pedidos verificables.")
+    report = pd.DataFrame({
+        "Modalidad": ["Maquila", "Corte propio"],
+        "Períodos históricos": [len(a), len(b)],
+        "Registrados completos": [int(a.origen.eq("REAL").sum()), int(b.origen.eq("REAL").sum())],
+        "Estimados": [int(a.origen.eq("IMPUTADO").sum()), int(b.origen.eq("IMPUTADO").sum())],
+        "Parciales o no clasificados": [
+            int(a.origen.isin(["MIXTO", "SIN_DECLARAR"]).sum()),
+            int(b.origen.isin(["MIXTO", "SIN_DECLARAR"]).sum()),
+        ],
     })
-    st.dataframe(preview, hide_index=True, use_container_width=True)
-    st.plotly_chart(px.line(preview, x="Periodo", y=["Demanda maquila", "Demanda corte"],
-                            title="Demanda de escenario por modalidad"),
-                    use_container_width=True)
+    st.dataframe(report, hide_index=True, use_container_width=True)
 
 with st.sidebar:
     st.header("Configuración LSTM")

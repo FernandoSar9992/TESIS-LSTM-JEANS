@@ -137,7 +137,7 @@ def seasonal_encoding(z, origin, lookback, representation, anchor, periodicity,
     La fase se alinea con el calendario real: 0=Enero-Se1 ... 47=Diciembre-Se4.
     La feria es una indicadora aproximada (Diciembre-Se3 y Se4), no ventas reales.
     """
-    indices = np.arange(origin-lookback+1, origin+1)
+    indices = np.arange(origin-lookback, origin)
     offset, factor = anchor if representation == "local" else (anchor, 1.)
     previous = indices-periodicity
     available = previous >= 0

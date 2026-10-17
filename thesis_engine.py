@@ -141,6 +141,9 @@ def candidates(config, earliest, calendar_offset=0):
     if config.seasonal_features and earliest >= config.periodicity+20:
         options += [{"lookback": lb, "units": units, "dropout": .1, "representation": "local", "periodicity": config.periodicity}
                     for lb in (4, 8, 12) if earliest-lb >= 20 for units in (8, 16)]
+    for candidate in options:
+        if candidate.get("periodicity"):
+            candidate["calendar_offset"] = calendar_offset
     if config.calendar_experiment and config.seasonal_features and config.periodicity == 48:
         options += [{"lookback": lb, "units": 8, "dropout": .1, "representation": "local",
                      "periodicity": 48, "calendar_extra": True, "calendar_offset": calendar_offset}

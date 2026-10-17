@@ -34,6 +34,7 @@ class ThesisConfig:
     periodicity: int = 48
     seasonal_features: bool = True
     refit_future: bool = True
+    calendar_experiment: bool = True
 
     def validate(self):
         if not .5 <= self.train_ratio <= .85 or not .05 <= self.validation_ratio <= .3 or self.train_ratio+self.validation_ratio > .95:
@@ -113,12 +114,25 @@ def temporal_folds(tr, va, min_train):
     return [(end, end+width) for end in (tr-2*width, tr-width, tr) if end >= min_train]
 
 
-def candidates(config, earliest):
+def calendar_start_offset(data):
+    """Posición del primer período dentro del año, sin consultar demanda."""
+    import re
+    months = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
+              "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    label = str(data.periodo.iloc[0]).strip().lower()
+    match = re.fullmatch(r"([a-záéíóúñ]+)\s+\d{4}-se([1-4])", label)
+    if not match or match.group(1) not in months:
+        raise ValueError(f"Período inicial desconocido: {label}")
+    return months.index(match.group(1)) * 4 + int(match.group(2)) - 1
+
+
+def candidates(config, earliest, calendar_offset=0):
     if not config.automatic:
         if earliest-config.lookback < 20:
             raise ValueError("La ventana deja menos de 20 secuencias de entrenamiento.")
         return [{"lookback": config.lookback, "units": config.units, "dropout": config.dropout, "representation": config.representation,
-                 "periodicity": config.periodicity if config.seasonal_features else None}]
+                 "periodicity": config.periodicity if config.seasonal_features else None,
+                 "calendar_offset": calendar_offset, "calendar_extra": config.calendar_experiment and config.seasonal_features}]
     windows = [4, 8, 12] + ([16, 24] if config.extended_windows else [])
     modes = ["local", "nivel", "cambio"] if config.auto_representation else [config.representation]
     options = [{"lookback": lb, "units": units, "dropout": dropout, "representation": mode, "periodicity": None}
@@ -127,13 +141,18 @@ def candidates(config, earliest):
     if config.seasonal_features and earliest >= config.periodicity+20:
         options += [{"lookback": lb, "units": units, "dropout": .1, "representation": "local", "periodicity": config.periodicity}
                     for lb in (4, 8, 12) if earliest-lb >= 20 for units in (8, 16)]
+    if config.calendar_experiment and config.seasonal_features and config.periodicity == 48:
+        options += [{"lookback": lb, "units": 8, "dropout": .1, "representation": "local",
+                     "periodicity": 48, "calendar_extra": True, "calendar_offset": calendar_offset}
+                    for lb in (4, 8, 12) if earliest-lb >= 20]
     return options
 
 
 def fit_candidate(y, data, fit_end, stop, candidate, config, seed):
     import tensorflow as tf
     tf.keras.backend.clear_session()
-    x, targets, origins, anchors, center, scale = scaled_windows(y[:stop], fit_end, candidate["lookback"], 1, candidate["representation"], candidate.get("periodicity"))
+    x, targets, origins, anchors, center, scale = scaled_windows(y[:stop], fit_end, candidate["lookback"], 1, candidate["representation"], candidate.get("periodicity"),
+                              candidate.get("calendar_offset", 0), candidate.get("calendar_extra", False))
     train = origins < fit_end
     val = origins >= fit_end
     valid_origins = origins[val]
@@ -172,7 +191,8 @@ def fit_arrays(model, x, targets, weights, config, callbacks, validation=None):
 
 
 def predict_observed(models, y, fit_end, candidate, origins):
-    x, _, all_origins, anchors, center, scale = scaled_windows(y, fit_end, candidate["lookback"], 1, candidate["representation"], candidate.get("periodicity"))
+    x, _, all_origins, anchors, center, scale = scaled_windows(y, fit_end, candidate["lookback"], 1, candidate["representation"], candidate.get("periodicity"),
+                              candidate.get("calendar_offset", 0), candidate.get("calendar_extra", False))
     indices = np.searchsorted(all_origins, origins)
     assert np.array_equal(all_origins[indices], origins)
     return np.mean([inverse_prediction(model, x[indices], anchors[indices], center, scale).ravel() for model in models], axis=0)
@@ -261,7 +281,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     folds = temporal_folds(tr, va, max_lb+20)
     if not folds:
         raise ValueError("No hay suficientes secuencias para esta ventana; reduzca lookback o agregue datos.")
-    options = candidates(config, folds[0][0])
+    options = candidates(config, folds[0][0], calendar_start_offset(data))
     ok, message = tensorflow_status()
     if not ok:
         raise RuntimeError(message)
@@ -288,8 +308,11 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         rows.append({"Variante": number, **candidate, "epochs": fitted["epochs"], "MAE_validacion": mae, "RMSE_validacion": rmse,
                      "Cortes_utilizados": len(usable), "Alcance": scope})
         if best_key is None or (rmse, mae) < best_key:
-            best_key, best = (rmse, mae), fitted
+            best_key, best = (rmse, mae), None
             selected = {**candidate, "epochs": fitted["epochs"], "Variante": number, "selection_scope": scope}
+    # El mejor candidato pudo provenir de otro fold: reajustar sobre TRAIN,
+    # antes de reportar validacion; ningun objetivo TEST se utiliza.
+    best = fit_candidate(y, data, tr, va, selected, replace(config, epochs=selected["epochs"]), config.seed)
     # Modelo del último corte ya ajustado exclusivamente en TRAIN. No se reajusta
     # ni el scaler ni los pesos con VALIDATION/TEST.
     models = [best["model"]]
@@ -371,7 +394,8 @@ def recursive_predictions(models, histories, candidate, scaler, horizon):
     output = np.empty((len(histories), horizon))
     for step in range(horizon):
         inputs = [future_input(np.asarray(seq), candidate['lookback'], candidate['representation'],
-                               scaler['center'], scaler['scale'], candidate.get('periodicity')) for seq in histories]
+                               scaler['center'], scaler['scale'], candidate.get('periodicity'), candidate.get('calendar_offset', 0),
+                               candidate.get('calendar_extra', False)) for seq in histories]
         x = np.concatenate([v[0] for v in inputs])
         offsets, factors = anchor_parts(np.asarray([v[1] for v in inputs]))
         members = []
@@ -429,7 +453,8 @@ def fit_production(result, progress=None):
     a, candidate = result['_artifacts'], result['selected']
     y = a['data'].demanda.to_numpy(float)
     config = replace(ThesisConfig(**result['config']), horizon=1, epochs=candidate['epochs'], dropout=candidate['dropout'])
-    x, targets, _, anchors, center, scale = scaled_windows(y, len(y), candidate['lookback'], 1, candidate['representation'], candidate.get('periodicity'))
+    x, targets, _, anchors, center, scale = scaled_windows(y, len(y), candidate['lookback'], 1, candidate['representation'], candidate.get('periodicity'),
+                                                          candidate.get('calendar_offset', 0), candidate.get('calendar_extra', False))
     models = []
     for member in range(config.members):
         if progress:

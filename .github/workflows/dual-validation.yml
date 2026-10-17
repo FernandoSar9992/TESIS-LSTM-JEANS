@@ -19,4 +19,4 @@ jobs:
       - name: Compilar todos los modulos Python
         run: python -m compileall -q .
       - name: Pruebas unitarias de demanda y pronostico dual
-        run: python -m unittest discover -s tests -p "test_dual_forecast.py" -v
+        run: python -m unittest discover -s tests -p "test_*.py" -v

@@ -44,7 +44,7 @@ class SeasonalFeatureTests(unittest.TestCase):
         self.assertEqual(x.shape[-1], xf.shape[-1])
 
     def test_candidates_include_nonseasonal_and_seasonal(self):
-        config = ThesisConfig()
+        config = ThesisConfig(calendar_experiment=True)
         opts = candidates(config, 85, 19)
         self.assertTrue(any(not c.get("periodicity") for c in opts))
         self.assertTrue(any(c.get("calendar_extra") for c in opts))

@@ -18,10 +18,10 @@ class SeasonalFeatureTests(unittest.TestCase):
     def test_december_fair_indicator_matches_calendar(self):
         z = np.arange(120, dtype=float)
         # diciembre-Se4 == period index 47; last feature pair: fair, low-season
-        dec = seasonal_encoding(z, 48, 1, "nivel", 0., 48, 0, True)
+        dec = seasonal_encoding(z, 47, 1, "nivel", 0., 48, 0, True)
         self.assertEqual(dec.shape, (1, 8))
         self.assertEqual(dec[0, -2], 1.)
-        jan = seasonal_encoding(z, 49, 1, "nivel", 0., 48, 0, True)
+        jan = seasonal_encoding(z, 48, 1, "nivel", 0., 48, 0, True)
         self.assertEqual(jan[0, -2], 0.)
         self.assertEqual(jan[0, -1], 1.)
 

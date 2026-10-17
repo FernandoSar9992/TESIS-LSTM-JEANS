@@ -66,6 +66,8 @@ with st.sidebar:
     st.header("Configuración LSTM")
     horizon = st.number_input("Períodos futuros (4 por mes)", 1, 24, 8)
     auto = st.checkbox("Optimización por validación temporal", value=True)
+    seasonal_exp = st.checkbox("Experimento estacional: feria y calendario", value=True,
+                               help="Compara opciones estacionales con la LSTM base; no modifica demanda.")
     lookback = st.number_input("Ventana histórica", 2, 24, 8)
     epochs = st.number_input("Épocas máximas", 20, 500, 120, step=20)
     units = st.selectbox("Unidades de la red", [8, 16, 24, 32], index=1)
@@ -79,7 +81,7 @@ with st.sidebar:
 
 config = ThesisConfig(horizon=int(horizon), automatic=auto, lookback=int(lookback), units=int(units),
                       epochs=int(epochs), periodicity=48, seed=int(seed),
-                      train_ratio=train/100, validation_ratio=val/100)
+                      train_ratio=train/100, validation_ratio=val/100, calendar_experiment=seasonal_exp)
 signature = sha256(content + str(sheet).encode() + repr(asdict(config)).encode()).hexdigest()
 if st.session_state.get("dual_signature") != signature:
     st.session_state["dual_signature"] = signature

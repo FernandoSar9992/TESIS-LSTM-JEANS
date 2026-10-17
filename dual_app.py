@@ -10,11 +10,12 @@ import streamlit as st
 
 from dual_forecast import prepare_dual, combined_forecast, combined_test
 from forecast_engine import future_labels
-from thesis_engine import ThesisConfig, run_thesis, finalize_test
+from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSION
 
+APP_VERSION = "dual-lstm-auditoria-v2-20261017"
 st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
 st.title("Pronóstico LSTM: maquila y corte propio")
-st.caption("Dos redes independientes · Total = suma · 48 períodos por año · Procedencia auditable")
+st.caption(f"Dos redes independientes · Total = suma · 48 períodos por año · Motor {ENGINE_VERSION} · {APP_VERSION}")
 
 uploaded = st.file_uploader("Excel de demanda del taller", type=["xlsx"])
 if uploaded is None:
@@ -82,7 +83,8 @@ with st.sidebar:
 config = ThesisConfig(horizon=int(horizon), automatic=auto, lookback=int(lookback), units=int(units),
                       epochs=int(epochs), periodicity=48, seed=int(seed),
                       train_ratio=train/100, validation_ratio=val/100, calendar_experiment=seasonal_exp)
-signature = sha256(content + str(sheet).encode() + repr(asdict(config)).encode()).hexdigest()
+signature = sha256(content + str(sheet).encode() + repr(asdict(config)).encode() +
+                   ENGINE_VERSION.encode() + APP_VERSION.encode()).hexdigest()
 if st.session_state.get("dual_signature") != signature:
     st.session_state["dual_signature"] = signature
     st.session_state.pop("dual_results", None)
@@ -115,6 +117,39 @@ if results:
     if vrows:
         st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
     st.caption("La validación se utiliza para seleccionar configuración. No constituye prueba independiente.")
+    with st.expander("Diagnóstico: configuración elegida y variantes estacionales", expanded=True):
+        selected_rows = []
+        for name, result in results.items():
+            selected = result["selected"]
+            season = ("Ferias y calendario" if selected.get("calendar_extra") else
+                      "Ciclo anual básico" if selected.get("periodicity") else "Sin estacionalidad")
+            selected_rows.append({
+                "Modalidad": name,
+                "Variante seleccionada": selected.get("Variante"),
+                "Representación": selected["representation"],
+                "Ventana": selected["lookback"],
+                "Unidades": selected["units"],
+                "Características": season,
+                "Objetivos de validación": result["selection_scope"],
+                "Candidatas examinadas": len(result["search"]),
+            })
+        st.dataframe(pd.DataFrame(selected_rows), hide_index=True, use_container_width=True)
+        if seasonal_exp:
+            for row in selected_rows:
+                if row["Características"] != "Ferias y calendario":
+                    st.info(f"{row['Modalidad']}: se evaluaron características de feria/calendario, "
+                            "pero la optimización seleccionó otra arquitectura. "
+                            "Activar el experimento no garantiza que el ganador use esas variables.")
+        for name, result in results.items():
+            st.markdown(f"**Opciones mejor puntuadas — {name}**")
+            ranking = result["search"].head(8).copy()
+            shown = [k for k in ("Variante", "representation", "lookback", "units",
+                                  "periodicity", "calendar_extra", "RMSE_validacion",
+                                  "MAE_validacion", "Cortes_utilizados") if k in ranking.columns]
+            st.dataframe(ranking[shown].round(3), hide_index=True, use_container_width=True)
+        st.caption("El RMSE de búsqueda resume los cortes de validación usados en la selección; "
+                   "puede diferir del RMSE del último corte mostrado arriba. "
+                   "Ninguno es una evaluación independiente sobre TEST.")
     with st.expander("Comparar LSTM con modelos de referencia (VALIDACIÓN)", expanded=True):
         for name, result in results.items():
             st.markdown(f"**{name}**")

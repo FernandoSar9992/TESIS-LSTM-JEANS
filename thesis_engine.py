@@ -34,7 +34,7 @@ class ThesisConfig:
     periodicity: int = 48
     seasonal_features: bool = True
     refit_future: bool = True
-    calendar_experiment: bool = True
+    calendar_experiment: bool = False
 
     def validate(self):
         if not .5 <= self.train_ratio <= .85 or not .05 <= self.validation_ratio <= .3 or self.train_ratio+self.validation_ratio > .95:

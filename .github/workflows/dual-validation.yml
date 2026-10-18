@@ -22,3 +22,4 @@ jobs:
         run: |
           python -m unittest discover -s tests -p "test_dual_forecast.py" -v
           python -m unittest discover -s tests -p "test_seasonal_features.py" -v
+          python -m unittest discover -s tests -p "test_seasonal_diagnostics.py" -v

@@ -11,6 +11,7 @@ import streamlit as st
 from dual_forecast import prepare_dual, combined_forecast, combined_test
 from forecast_engine import future_labels
 from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSION
+from seasonal_diagnostics import profile_temporal
 
 APP_VERSION = "dual-lstm-auditoria-v2-20261017"
 st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
@@ -117,6 +118,26 @@ if results:
     if vrows:
         st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
     st.caption("La validación se utiliza para seleccionar configuración. No constituye prueba independiente.")
+    with st.expander("Auditoría temporal y calidad de los datos (sin abrir TEST)", expanded=True):
+        diag_rows = []
+        for name, data in series.items():
+            p = profile_temporal(data, train_ratio=config.train_ratio,
+                                 val_ratio=config.validation_ratio, period=config.periodicity)
+            base = p["ESTACIONAL_TODOS_DESCRIPTIVO"]
+            observed = p["ESTACIONAL_SOLO_REAL"]
+            diag_rows.append({
+                "Modalidad": name, "Períodos": p["N_total"],
+                "Observaciones REAL": p["REAL_TOTAL"],
+                "REAL en validación": p["REAL_VALIDACION"],
+                "Imputados": p["IMPUTADO_TOTAL"], "Mixtos": p["MIXTO_TOTAL"],
+                "Correlación anual TRAIN": p["CORR_ANUAL_TRAIN"],
+                "R² estacional descriptivo": base["R2"],
+                "R² estacional SOLO_REAL": observed["R2"],
+            })
+        st.dataframe(pd.DataFrame(diag_rows).round(3), hide_index=True, use_container_width=True)
+        st.warning("El R² sobre períodos reconstruidos o sintéticos es descriptivo. "
+                   "No acredita capacidad predictiva de pedidos observados. "
+                   "TEST permanece reservado.")
     with st.expander("Diagnóstico: configuración elegida y variantes estacionales", expanded=True):
         selected_rows = []
         for name, result in results.items():

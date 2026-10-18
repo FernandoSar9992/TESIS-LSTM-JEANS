@@ -13,7 +13,7 @@ from forecast_engine import future_labels
 from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSION
 from seasonal_diagnostics import profile_temporal
 
-APP_VERSION = "dual-lstm-auditoria-v2-20261017"
+APP_VERSION = "dual-lstm-v7-comparable-huber-20261018"
 st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
 st.title("Pronóstico LSTM: maquila y corte propio")
 st.caption(f"Dos redes independientes · Total = suma · 48 períodos por año · Motor {ENGINE_VERSION} · {APP_VERSION}")
@@ -70,6 +70,8 @@ with st.sidebar:
     auto = st.checkbox("Optimización por validación temporal", value=True)
     seasonal_exp = st.checkbox("Experimento estacional: feria y calendario", value=True,
                                help="Compara opciones estacionales con la LSTM base; no modifica demanda.")
+    robust_trial = st.checkbox("Probar variantes LSTM con pérdida Huber (experimental)", value=False,
+                               help="Añade siete candidatos LSTM con pérdida robusta. No modifica los datos.")
     lookback = st.number_input("Ventana histórica", 2, 24, 8)
     epochs = st.number_input("Épocas máximas", 20, 500, 120, step=20)
     units = st.selectbox("Unidades de la red", [8, 16, 24, 32], index=1)
@@ -83,7 +85,7 @@ with st.sidebar:
 
 config = ThesisConfig(horizon=int(horizon), automatic=auto, lookback=int(lookback), units=int(units),
                       epochs=int(epochs), periodicity=48, seed=int(seed),
-                      train_ratio=train/100, validation_ratio=val/100, calendar_experiment=seasonal_exp)
+                      train_ratio=train/100, validation_ratio=val/100, calendar_experiment=seasonal_exp, robust_experiment=robust_trial)
 signature = sha256(content + str(sheet).encode() + repr(asdict(config)).encode() +
                    ENGINE_VERSION.encode() + APP_VERSION.encode()).hexdigest()
 if st.session_state.get("dual_signature") != signature:
@@ -150,6 +152,7 @@ if results:
                 "Representación": selected["representation"],
                 "Ventana": selected["lookback"],
                 "Unidades": selected["units"],
+                "Pérdida": selected.get("loss", "mse"),
                 "Características": season,
                 "Objetivos de validación": result["selection_scope"],
                 "Candidatas examinadas": len(result["search"]),
@@ -165,7 +168,7 @@ if results:
             st.markdown(f"**Opciones mejor puntuadas — {name}**")
             ranking = result["search"].head(8).copy()
             shown = [k for k in ("Variante", "representation", "lookback", "units",
-                                  "periodicity", "calendar_extra", "RMSE_validacion",
+                                  "periodicity", "calendar_extra", "loss", "RMSE_validacion",
                                   "MAE_validacion", "Cortes_utilizados") if k in ranking.columns]
             st.dataframe(ranking[shown].round(3), hide_index=True, use_container_width=True)
         st.caption("El RMSE de búsqueda resume los cortes de validación usados en la selección; "

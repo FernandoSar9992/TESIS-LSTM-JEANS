@@ -222,7 +222,10 @@ def build_network(candidate, config, seed):
         tf.keras.layers.Dropout(config.dropout),
         tf.keras.layers.Dense(config.horizon, kernel_initializer="zeros"),
     ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(config.learning_rate, clipnorm=1.), loss="mse")
+    # Huber limita la influencia de errores extraordinarios en TRAIN.
+    # El objetivo observado, la predicción y las métricas no se modifican.
+    loss = tf.keras.losses.Huber(delta=1.0) if candidate.get("loss") == "huber" else "mse"
+    model.compile(optimizer=tf.keras.optimizers.Adam(config.learning_rate, clipnorm=1.), loss=loss)
     return model
 
 

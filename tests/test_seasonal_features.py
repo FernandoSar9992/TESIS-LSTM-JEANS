@@ -43,6 +43,23 @@ class SeasonalFeatureTests(unittest.TestCase):
         self.assertEqual(xf.shape, (1, 8, 10))
         self.assertEqual(x.shape[-1], xf.shape[-1])
 
+    def test_annual_residual_alignment_and_causal_inputs(self):
+        values = np.tile(np.arange(48, dtype=float) + 150, 4)
+        x, target, origins, anchors, center, scale = scaled_windows(
+            values, 130, 8, 1, "estacional", 48)
+        self.assertEqual(origins[0], 48)
+        expected = (values[origins] - values[origins - 48]) / scale
+        np.testing.assert_allclose(target.ravel(), expected, atol=1e-5)
+        future, anchor = future_input(values[:150], 8, "estacional",
+                                      center, scale, 48)
+        np.testing.assert_allclose(future[0], x[origins == 150][0])
+        self.assertAlmostEqual(float(anchor), float(anchors[origins == 150][0]))
+
+    def test_short_series_gets_annual_candidates_with_later_folds(self):
+        config = ThesisConfig(calendar_experiment=True)
+        variants = candidates(config, 45, 19, latest_training=79)
+        self.assertTrue(any(v["representation"] == "estacional" for v in variants))
+
     def test_candidates_include_nonseasonal_and_seasonal(self):
         config = ThesisConfig(calendar_experiment=True)
         opts = candidates(config, 85, 19)

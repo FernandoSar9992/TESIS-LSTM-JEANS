@@ -334,7 +334,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         notify(f"Entrenamiento adicional LSTM {member+1}/{config.members}, solo TRAIN")
         member_fit = fit_candidate(y, data, tr, va, selected, replace(config, epochs=selected["epochs"]), config.seed+member)
         models.append(member_fit["model"])
-    common_start = max(selected["lookback"], 12)
+    common_start = max(selected["lookback"], 12, config.periodicity if selected["representation"] == "estacional" else 0)
     train_origins = np.arange(common_start, tr)
     val_origins = np.arange(tr, va)
     lags = [1, 2, 3, 4, 8, 12]

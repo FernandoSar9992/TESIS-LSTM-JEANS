@@ -60,6 +60,23 @@ class SeasonalFeatureTests(unittest.TestCase):
         variants = candidates(config, 45, 19, latest_training=79)
         self.assertTrue(any(v["representation"] == "estacional" for v in variants))
 
+    def test_candidate_folds_are_comparable_for_short_corte(self):
+        from thesis_engine import comparable_folds, temporal_folds
+        config = ThesisConfig(calendar_experiment=True)
+        f = temporal_folds(79, 95, 32)
+        common = comparable_folds(f, config, 79)
+        self.assertTrue(all(end >= 56 for end, _ in common))
+        self.assertTrue(len(common) >= 1)
+
+    def test_huber_only_added_on_opt_in(self):
+        config = ThesisConfig(calendar_experiment=True, robust_experiment=True)
+        opts = candidates(config, 45, 19, latest_training=79)
+        robust = [v for v in opts if v.get("loss") == "huber"]
+        self.assertEqual(len(robust), 7)
+        self.assertTrue(all(v["representation"] in ("local", "cambio", "estacional") for v in robust))
+        basic = candidates(ThesisConfig(calendar_experiment=True), 45, 19, latest_training=79)
+        self.assertFalse(any(v.get("loss") == "huber" for v in basic))
+
     def test_candidates_include_nonseasonal_and_seasonal(self):
         config = ThesisConfig(calendar_experiment=True)
         opts = candidates(config, 85, 19)

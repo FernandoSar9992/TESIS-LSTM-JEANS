@@ -126,7 +126,7 @@ def calendar_start_offset(data):
     return months.index(match.group(1)) * 4 + int(match.group(2)) - 1
 
 
-def candidates(config, earliest, calendar_offset=0):
+def candidates(config, earliest, calendar_offset=0, latest_training=None):
     if not config.automatic:
         if earliest-config.lookback < 20:
             raise ValueError("La ventana deja menos de 20 secuencias de entrenamiento.")
@@ -148,7 +148,7 @@ def candidates(config, earliest, calendar_offset=0):
         options += [{"lookback": lb, "units": 8, "dropout": .1, "representation": "local",
                      "periodicity": 48, "calendar_extra": True, "calendar_offset": calendar_offset}
                     for lb in (4, 8, 12) if earliest-lb >= 20]
-    if config.seasonal_features and earliest >= config.periodicity + 4:
+    if config.seasonal_features and (latest_training if latest_training is not None else earliest) >= config.periodicity + 8:
         options += [
             {"lookback": lb, "units": units, "dropout": .1,
              "representation": "estacional", "periodicity": config.periodicity,
@@ -291,7 +291,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     folds = temporal_folds(tr, va, max_lb+20)
     if not folds:
         raise ValueError("No hay suficientes secuencias para esta ventana; reduzca lookback o agregue datos.")
-    options = candidates(config, folds[0][0], calendar_start_offset(data))
+    options = candidates(config, folds[0][0], calendar_start_offset(data), latest_training=tr)
     ok, message = tensorflow_status()
     if not ok:
         raise RuntimeError(message)

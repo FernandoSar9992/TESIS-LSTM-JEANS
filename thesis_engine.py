@@ -9,7 +9,7 @@ import pandas as pd
 from forecast_engine import metrics, _ridge_fit, _ridge_predict, tensorflow_status
 from lstm_engine import scaled_windows, future_input, inverse_prediction, build_network, sample_weights
 
-ENGINE_VERSION = "tesis-lstm-v5"
+ENGINE_VERSION = "tesis-lstm-v6-anual"
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ class ThesisConfig:
                 raise ValueError(f"{field} debe ser un entero positivo.")
         if self.members not in (1, 3) or self.units > 32 or not 2 <= self.lookback <= 24:
             raise ValueError("Use 1 o 3 redes, hasta 32 unidades y ventanas de 2–24 períodos.")
-        if self.representation not in ("nivel", "cambio", "local") or not 0 <= self.dropout < 1 or not 0 < self.learning_rate <= .1:
+        if self.representation not in ("nivel", "cambio", "local", "estacional") or not 0 <= self.dropout < 1 or not 0 < self.learning_rate <= .1:
             raise ValueError("Representación, dropout o tasa de aprendizaje inválidos.")
         if not isinstance(self.seed, int) or not 0 <= self.seed < 2**32 or not isinstance(self.periodicity, int) or self.periodicity < 2:
             raise ValueError("Semilla o periodicidad inválida.")
@@ -148,6 +148,13 @@ def candidates(config, earliest, calendar_offset=0):
         options += [{"lookback": lb, "units": 8, "dropout": .1, "representation": "local",
                      "periodicity": 48, "calendar_extra": True, "calendar_offset": calendar_offset}
                     for lb in (4, 8, 12) if earliest-lb >= 20]
+    if config.seasonal_features and earliest >= config.periodicity + 12:
+        options += [
+            {"lookback": lb, "units": units, "dropout": .1,
+             "representation": "estacional", "periodicity": config.periodicity,
+             "calendar_offset": calendar_offset, "calendar_extra": False}
+            for lb in (4, 8, 12) for units in (8, 16)
+        ]
     return options
 
 

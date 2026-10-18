@@ -148,7 +148,7 @@ def candidates(config, earliest, calendar_offset=0):
         options += [{"lookback": lb, "units": 8, "dropout": .1, "representation": "local",
                      "periodicity": 48, "calendar_extra": True, "calendar_offset": calendar_offset}
                     for lb in (4, 8, 12) if earliest-lb >= 20]
-    if config.seasonal_features and earliest >= config.periodicity + 12:
+    if config.seasonal_features and earliest >= config.periodicity + 4:
         options += [
             {"lookback": lb, "units": units, "dropout": .1,
              "representation": "estacional", "periodicity": config.periodicity,
@@ -305,11 +305,15 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     for number, candidate in enumerate(options, 1):
         scores = []
         for cut, (fit_end, stop) in enumerate(folds, 1):
+            if candidate["representation"] == "estacional" and fit_end < config.periodicity + 8:
+                continue
             notify(f"LSTM {number}/{len(options)} · {candidate['representation']} · ventana {candidate['lookback']} · {candidate['units']} unidades · corte {cut}/{len(folds)}")
             fitted = fit_candidate(y, data, fit_end, stop, candidate, config, config.seed)
             scores.append(fitted)
             fold_rows.append({"Variante": number, "Corte": cut, "Train_fin": fit_end, "Validacion_fin": stop,
                               "Alcance": fitted["scope"], "Epocas": fitted["epochs"], **fitted["scores"]})
+        if not scores:
+            continue
         usable = [s for s in scores if s["eligible"]] or scores
         mae = float(np.mean([s["scores"]["MAE"] for s in usable]))
         rmse = float(np.mean([s["scores"]["RMSE"] for s in usable]))

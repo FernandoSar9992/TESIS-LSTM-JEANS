@@ -165,11 +165,23 @@ def scaled_windows(y, fit_end, lookback, horizon, representation, periodicity=No
     if scale < 1e-8:
         scale = max(abs(center)*1e-6, 1.)
     z = (y-center)/scale
-    origins = np.arange(lookback, len(y)-horizon+1)
+    if representation == "estacional":
+        if periodicity is None:
+            raise ValueError("La representación estacional necesita un ciclo definido.")
+        first_origin = max(lookback, periodicity)
+    else:
+        first_origin = lookback
+    origins = np.arange(first_origin, len(y)-horizon+1)
     x, target, anchors = [], [], []
     for origin in origins:
         lag = z[origin-lookback:origin]
-        encoded, anchor = window_encoding(lag, representation)
+        if representation == "estacional":
+            # y[t-period] ya era conocido cuando se pronostica y[t].
+            # El unico modelo que aprende la correccion es la LSTM.
+            anchor = float(z[origin-periodicity])
+            encoded = np.column_stack((lag-anchor, np.r_[0., np.diff(lag)]))
+        else:
+            encoded, anchor = window_encoding(lag, representation)
         if periodicity is not None:
             encoded = np.column_stack((encoded, seasonal_encoding(z, origin, lookback, representation, anchor, periodicity,
                                                                          calendar_offset, calendar_extra)))
@@ -186,7 +198,13 @@ def scaled_windows(y, fit_end, lookback, horizon, representation, periodicity=No
 def future_input(y, lookback, representation, center, scale, periodicity=None,
                  calendar_offset=0, calendar_extra=False):
     lag = (y[-lookback:]-center)/scale
-    encoded, anchor = window_encoding(lag, representation)
+    if representation == "estacional":
+        if periodicity is None or len(y) < periodicity:
+            raise ValueError("Falta un ciclo previo para pronosticar.")
+        anchor = float((y[-periodicity]-center)/scale)
+        encoded = np.column_stack((lag-anchor, np.r_[0., np.diff(lag)]))
+    else:
+        encoded, anchor = window_encoding(lag, representation)
     if periodicity is not None:
         encoded = np.column_stack((encoded, seasonal_encoding((np.asarray(y)-center)/scale, len(y), lookback, representation,
                                                                      anchor, periodicity, calendar_offset, calendar_extra)))

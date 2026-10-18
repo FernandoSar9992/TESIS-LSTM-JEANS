@@ -9,7 +9,7 @@ import pandas as pd
 from forecast_engine import metrics, _ridge_fit, _ridge_predict, tensorflow_status
 from lstm_engine import scaled_windows, future_input, inverse_prediction, build_network, sample_weights
 
-ENGINE_VERSION = "tesis-lstm-v6-anual"
+ENGINE_VERSION = "tesis-lstm-v7-auditoria-robusta"
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ class ThesisConfig:
     seasonal_features: bool = True
     refit_future: bool = True
     calendar_experiment: bool = False
+    robust_experiment: bool = False
 
     def validate(self):
         if not .5 <= self.train_ratio <= .85 or not .05 <= self.validation_ratio <= .3 or self.train_ratio+self.validation_ratio > .95:
@@ -114,6 +115,25 @@ def temporal_folds(tr, va, min_train):
     return [(end, end+width) for end in (tr-2*width, tr-width, tr) if end >= min_train]
 
 
+def comparable_folds(folds, config, latest_training):
+    """La optimización compara TODOS los candidatos en idénticos períodos.
+
+    Las variantes estacionales solo pueden entrenarse una vez que existen
+    48 períodos de historia y un mínimo de 8 muestras de aprendizaje.
+    Al habilitar la búsqueda anual, ese límite se aplica también al resto.
+    No se excluye ningún período TEST ni se usa su demanda.
+    """
+    annual = (config.seasonal_features and
+              (config.automatic or config.representation == "estacional") and
+              latest_training >= config.periodicity + 8)
+    if not annual:
+        return folds
+    eligible = [(a, b) for a, b in folds if a >= config.periodicity + 8]
+    if not eligible:
+        raise ValueError("Falta historial para comparar modelos estacionales en cortes comunes.")
+    return eligible
+
+
 def calendar_start_offset(data):
     """Posición del primer período dentro del año, sin consultar demanda."""
     import re
@@ -154,6 +174,26 @@ def candidates(config, earliest, calendar_offset=0, latest_training=None):
              "representation": "estacional", "periodicity": config.periodicity,
              "calendar_offset": calendar_offset, "calendar_extra": False}
             for lb in (4, 8, 12) for units in (8, 16)
+        ]
+    if config.robust_experiment:
+        # Experimento acotado: no sustituye ni modifica objetivos.
+        # La función Huber sigue entrenando solo redes LSTM.
+        seeds = [
+            ("local", 8, 8, None), ("local", 12, 16, None),
+            ("cambio", 4, 8, None), ("cambio", 8, 16, None),
+        ]
+        if config.seasonal_features and (latest_training if latest_training is not None else earliest) >= config.periodicity+8:
+            seeds.extend([
+                ("estacional", 4, 8, config.periodicity),
+                ("estacional", 8, 8, config.periodicity),
+                ("estacional", 12, 16, config.periodicity),
+            ])
+        options += [
+            {"lookback": lb, "units": units, "dropout": .1,
+             "representation": mode, "periodicity": cycle,
+             "calendar_offset": calendar_offset, "calendar_extra": False,
+             "loss": "huber"}
+            for mode, lb, units, cycle in seeds
         ]
     return options
 
@@ -292,6 +332,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     if not folds:
         raise ValueError("No hay suficientes secuencias para esta ventana; reduzca lookback o agregue datos.")
     options = candidates(config, folds[0][0], calendar_start_offset(data), latest_training=tr)
+    folds = comparable_folds(folds, config, tr)
     ok, message = tensorflow_status()
     if not ok:
         raise RuntimeError(message)
@@ -305,8 +346,6 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     for number, candidate in enumerate(options, 1):
         scores = []
         for cut, (fit_end, stop) in enumerate(folds, 1):
-            if candidate["representation"] == "estacional" and fit_end < config.periodicity + 8:
-                continue
             notify(f"LSTM {number}/{len(options)} · {candidate['representation']} · ventana {candidate['lookback']} · {candidate['units']} unidades · corte {cut}/{len(folds)}")
             fitted = fit_candidate(y, data, fit_end, stop, candidate, config, config.seed)
             scores.append(fitted)
@@ -314,6 +353,8 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
                               "Alcance": fitted["scope"], "Epocas": fitted["epochs"], **fitted["scores"]})
         if not scores:
             continue
+        # La ausencia de objetivos REAL se documenta; los mismos cortes
+        # temporales participan en todas las variantes.
         usable = [s for s in scores if s["eligible"]] or scores
         mae = float(np.mean([s["scores"]["MAE"] for s in usable]))
         rmse = float(np.mean([s["scores"]["RMSE"] for s in usable]))
@@ -362,7 +403,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
               "processed": processed, "history": {"loss": h["loss"], "val_loss": h["val_loss"], "parameters": best["model"].count_params()},
               "training_summary": {"Epocas_ejecutadas": len(h["loss"]), "Mejor_epoca": best["epochs"], "Mejor_val_loss": min(h["val_loss"]),
                                    "Train_loss_final": h["loss"][-1], "Val_loss_final": h["val_loss"][-1]},
-              "train_end": tr, "val_end": va, "train_windows": tr-selected["lookback"], "validation_origins": va-tr,
+              "train_end": tr, "val_end": va, "train_windows": tr-max(selected["lookback"], config.periodicity if selected["representation"] == "estacional" else 0), "validation_origins": va-tr,
               "test_origins": len(data)-va, "fold_count": len(folds), "selection_scope": selected["selection_scope"],
               "ridge_alpha": alpha, "scaler": {"fit_end": tr, "center": best["center"], "scale": best["scale"]},
               "data_hash": sha256(data.to_csv(index=False).encode()).hexdigest(), "evaluated": False,

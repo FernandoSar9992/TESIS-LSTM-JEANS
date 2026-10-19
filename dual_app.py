@@ -4,7 +4,7 @@ from hashlib import sha256
 import numpy as np
 import pandas as pd
 import streamlit as st
-from forecast_engine import period_positions, future_labels
+from forecast_engine import period_positions, future_labels, metrics
 from thesis_engine import ThesisConfig, run_thesis, finalize_test
 
 st.set_page_config(page_title="Pronóstico de demanda",page_icon="📈",layout="wide")
@@ -60,12 +60,17 @@ signature=sha256(uploaded.getvalue()+f"{h}-{epochs}-{seed}".encode()).hexdigest(
 if st.session_state.get("firma_pronostico")!=signature:
     st.session_state["firma_pronostico"]=signature
     st.session_state.pop("resultado_pronostico",None)
+    st.session_state.pop("metricas_finales",None)
 
 if st.button("Generar pronóstico",type="primary"):
+    st.session_state.pop("resultado_pronostico",None)
+    st.session_state.pop("metricas_finales",None)
     config=ThesisConfig(horizon=int(h),epochs=int(epochs),seed=int(seed),
                         periodicity=48,automatic=True,seasonal_features=True,
                         calendar_experiment=True)
     results={}
+    test_details={}
+    test_metrics={}
     try:
         for title,s in series.items():
             with st.spinner(f"Calculando pronóstico de {title}…"):
@@ -73,11 +78,41 @@ if st.button("Generar pronóstico",type="primary"):
                 r=run_thesis(s,config,future_periods=labels,evaluate_test=False)
                 r=finalize_test(r)
                 results[title]=r["forecast"][["Periodo","Horizonte","LSTM"]].copy()
+                test_details[title]=r["detail"][["Periodo","Demanda_real","Prediccion_LSTM"]].copy()
+                score=r["metrics"].loc[r["metrics"]["Modelo"].eq("LSTM")]
+                if len(score)!=1:
+                    raise ValueError(f"{title}: no se encontró una métrica TEST única para LSTM.")
+                test_metrics[title]=score.iloc[0]
         left=results["Maquila"].rename(columns={"LSTM":"Maquila"})
         right=results["Corte propio"].rename(columns={"LSTM":"Corte propio"})
         both=left.merge(right,on=["Periodo","Horizonte"],validate="one_to_one")
         both["Total"]=both["Maquila"]+both["Corte propio"]
+        score_rows=[]
+        for title in ("Maquila","Corte propio"):
+            metric=test_metrics[title]
+            score_rows.append({
+                "Modalidad":title, "N TEST":int(metric["N"]),
+                "R²":float(metric["R2"]), "MAE":float(metric["MAE"]),
+                "RMSE":float(metric["RMSE"]), "MAPE (%)":float(metric["MAPE_%"]),
+            })
+        left_test=test_details["Maquila"].rename(columns={
+            "Demanda_real":"Real_maquila", "Prediccion_LSTM":"Pred_maquila"
+        })
+        right_test=test_details["Corte propio"].rename(columns={
+            "Demanda_real":"Real_corte", "Prediccion_LSTM":"Pred_corte"
+        })
+        common_test=left_test.merge(right_test,on="Periodo",how="inner",validate="one_to_one")
+        if len(common_test)>=2:
+            real_total=common_test["Real_maquila"].to_numpy()+common_test["Real_corte"].to_numpy()
+            pred_total=common_test["Pred_maquila"].to_numpy()+common_test["Pred_corte"].to_numpy()
+            total_score=metrics(real_total,pred_total)
+            score_rows.append({
+                "Modalidad":"Total (períodos compartidos)", "N TEST":len(common_test),
+                "R²":total_score["R2"],"MAE":total_score["MAE"],
+                "RMSE":total_score["RMSE"],"MAPE (%)":total_score["MAPE_%"],
+            })
         st.session_state["resultado_pronostico"]=both
+        st.session_state["metricas_finales"]=pd.DataFrame(score_rows)
     except Exception as exc:
         st.error(f"No se pudo generar el pronóstico: {exc}")
 
@@ -93,3 +128,16 @@ if out is not None:
     st.download_button("Descargar pronósticos (CSV)",
                        out.to_csv(index=False,sep=";").encode("utf-8-sig"),
                        file_name="PRONOSTICO_LSTM.csv",mime="text/csv")
+
+    st.divider()
+    st.subheader("Métricas finales de evaluación (TEST)")
+    scores=st.session_state.get("metricas_finales")
+    if scores is not None:
+        st.dataframe(scores.round(3),hide_index=True,use_container_width=True)
+        st.caption("R², MAE, RMSE y MAPE evalúan predicciones de UN período "
+                   "sobre datos reservados de TEST; no miden la exactitud de "
+                   "los 12 períodos futuros, cuyos valores aún se desconocen.")
+        st.info("La hoja cargada no aporta trazabilidad verificable de pedidos. "
+                "Si es sintética, estas métricas son experimentales y no "
+                "constituyen validación frente a la demanda real del taller. "
+                "La fila Total utiliza solo los períodos TEST comunes.")

@@ -14,7 +14,7 @@ from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSIO
 from seasonal_diagnostics import profile_temporal
 from validation_audit import validation_error_audit, validation_error_summary, validation_error_priority
 
-APP_VERSION = "dual-lstm-v8-auditoria-periodos-20261019"
+APP_VERSION = "dual-lstm-v8.1-descargas-visibles-20261019"
 st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
 st.title("Pronóstico LSTM: maquila y corte propio")
 st.caption(f"Dos redes independientes · Total = suma · 48 períodos por año · Motor {ENGINE_VERSION} · {APP_VERSION}")
@@ -112,6 +112,50 @@ if st.button("1. Entrenar ambas LSTM y revisar validación", type="primary"):
 
 results = st.session_state.get("dual_results")
 if results:
+    # Descargas situadas al PRINCIPIO de los resultados, sin tener que buscar
+    # después de tablas largas. No se abre TEST ni se modifica el histórico.
+    st.subheader("📥 Descargar auditoría de VALIDACIÓN")
+    st.caption("Los archivos contienen únicamente los períodos de VALIDACIÓN "
+               "y distinguen REAL, IMPUTADO, MIXTO y SIN_DECLARAR.")
+    audit_files = {}
+    for name, result in results.items():
+        detail = validation_error_audit(result)
+        audit_files[name] = (
+            detail,
+            validation_error_summary(detail),
+            validation_error_priority(detail),
+        )
+    col_mq, col_ct = st.columns(2)
+    with col_mq:
+        st.download_button(
+            "⬇️ Descargar MAQUILA (CSV)",
+            data=audit_files["Maquila"][0].to_csv(index=False, sep=";").encode("utf-8-sig"),
+            file_name="AUDITORIA_MAQUILA_VALIDACION.csv",
+            mime="text/csv", key="audit_mq_csv", use_container_width=True)
+    with col_ct:
+        st.download_button(
+            "⬇️ Descargar CORTE PROPIO (CSV)",
+            data=audit_files["Corte propio"][0].to_csv(index=False, sep=";").encode("utf-8-sig"),
+            file_name="AUDITORIA_CORTE_VALIDACION.csv",
+            mime="text/csv", key="audit_ct_csv", use_container_width=True)
+    try:
+        audit_buffer = BytesIO()
+        with pd.ExcelWriter(audit_buffer, engine="openpyxl") as writer:
+            for name, (detail, summary, priority) in audit_files.items():
+                label = "Maquila" if name == "Maquila" else "Corte"
+                detail.to_excel(writer, sheet_name=f"{label}_periodos", index=False)
+                summary.to_excel(writer, sheet_name=f"{label}_resumen", index=False)
+                priority.to_excel(writer, sheet_name=f"{label}_prioridad", index=False)
+        st.download_button(
+            "📥 DESCARGAR AUDITORÍA COMPLETA (EXCEL)",
+            data=audit_buffer.getvalue(),
+            file_name="AUDITORIA_VALIDACION_LSTM.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary", key="audit_full_xlsx", use_container_width=True)
+    except Exception as exc:
+        st.warning("No se pudo crear el Excel de auditoría: "
+                   f"{exc}. Puedes descargar los dos CSV de arriba.")
+    st.divider()
     st.subheader("Validación temporal (para seleccionar configuración)")
     vrows = []
     for name, result in results.items():
@@ -144,26 +188,12 @@ if results:
     with st.expander("Auditoría de errores por período — SOLO VALIDACIÓN", expanded=True):
         st.caption("No se consulta TEST ni se modifican los pedidos. Los cambios de demanda mostrados "
                    "son diagnósticos retrospectivos y no variables usadas por la red.")
-        audit_files = {}
-        for name, result in results.items():
-            detail_audit = validation_error_audit(result)
-            summary_audit = validation_error_summary(detail_audit)
-            priority_audit = validation_error_priority(detail_audit)
+        for name, (detail_audit, summary_audit, priority_audit) in audit_files.items():
             st.markdown(f"**{name}: resumen por origen**")
             st.dataframe(summary_audit.round(3), hide_index=True, use_container_width=True)
             st.markdown(f"**{name}: 10 períodos que más contribuyen al error**")
             st.dataframe(priority_audit.round(3), hide_index=True, use_container_width=True)
-            audit_files[name] = (detail_audit, summary_audit, priority_audit)
-        with BytesIO() as audit_buffer:
-            with pd.ExcelWriter(audit_buffer, engine="openpyxl") as writer:
-                for name, (detail, summary, priority) in audit_files.items():
-                    label = "Maquila" if name == "Maquila" else "Corte"
-                    detail.to_excel(writer, sheet_name=f"{label}_periodos", index=False)
-                    summary.to_excel(writer, sheet_name=f"{label}_resumen", index=False)
-                    priority.to_excel(writer, sheet_name=f"{label}_prioridad", index=False)
-            st.download_button("Descargar auditoría VALIDACIÓN (Excel)",
-                               audit_buffer.getvalue(), file_name="AUDITORIA_VALIDACION_LSTM.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.caption("Las descargas de Excel y CSV están ARRIBA de la tabla de validación.")
         st.warning("Los objetivos MIXTO e IMPUTADO no son observaciones reales completas. "
                    "La auditoría identifica diferencias; no demuestra automáticamente si un registro es incorrecto.")
     with st.expander("Diagnóstico: configuración elegida y variantes estacionales", expanded=True):

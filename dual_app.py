@@ -12,8 +12,9 @@ from dual_forecast import prepare_dual, combined_forecast, combined_test
 from forecast_engine import future_labels
 from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSION
 from seasonal_diagnostics import profile_temporal
+from validation_audit import validation_error_audit, validation_error_summary, validation_error_priority
 
-APP_VERSION = "dual-lstm-v7-comparable-huber-20261018"
+APP_VERSION = "dual-lstm-v8-auditoria-periodos-20261019"
 st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
 st.title("Pronóstico LSTM: maquila y corte propio")
 st.caption(f"Dos redes independientes · Total = suma · 48 períodos por año · Motor {ENGINE_VERSION} · {APP_VERSION}")
@@ -140,6 +141,31 @@ if results:
         st.warning("El R² sobre períodos reconstruidos o sintéticos es descriptivo. "
                    "No acredita capacidad predictiva de pedidos observados. "
                    "TEST permanece reservado.")
+    with st.expander("Auditoría de errores por período — SOLO VALIDACIÓN", expanded=True):
+        st.caption("No se consulta TEST ni se modifican los pedidos. Los cambios de demanda mostrados "
+                   "son diagnósticos retrospectivos y no variables usadas por la red.")
+        audit_files = {}
+        for name, result in results.items():
+            detail_audit = validation_error_audit(result)
+            summary_audit = validation_error_summary(detail_audit)
+            priority_audit = validation_error_priority(detail_audit)
+            st.markdown(f"**{name}: resumen por origen**")
+            st.dataframe(summary_audit.round(3), hide_index=True, use_container_width=True)
+            st.markdown(f"**{name}: 10 períodos que más contribuyen al error**")
+            st.dataframe(priority_audit.round(3), hide_index=True, use_container_width=True)
+            audit_files[name] = (detail_audit, summary_audit, priority_audit)
+        with BytesIO() as audit_buffer:
+            with pd.ExcelWriter(audit_buffer, engine="openpyxl") as writer:
+                for name, (detail, summary, priority) in audit_files.items():
+                    label = "Maquila" if name == "Maquila" else "Corte"
+                    detail.to_excel(writer, sheet_name=f"{label}_periodos", index=False)
+                    summary.to_excel(writer, sheet_name=f"{label}_resumen", index=False)
+                    priority.to_excel(writer, sheet_name=f"{label}_prioridad", index=False)
+            st.download_button("Descargar auditoría VALIDACIÓN (Excel)",
+                               audit_buffer.getvalue(), file_name="AUDITORIA_VALIDACION_LSTM.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.warning("Los objetivos MIXTO e IMPUTADO no son observaciones reales completas. "
+                   "La auditoría identifica diferencias; no demuestra automáticamente si un registro es incorrecto.")
     with st.expander("Diagnóstico: configuración elegida y variantes estacionales", expanded=True):
         selected_rows = []
         for name, result in results.items():

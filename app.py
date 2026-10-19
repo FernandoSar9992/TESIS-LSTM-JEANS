@@ -95,9 +95,10 @@ with st.sidebar:
 if is_workshop:
     from workshop_app import render_workshop
     workshop_mapping.update(period=period_col, target=demand_col)
-    # El usuario confirmó la procedencia real de los datos de su taller.
+    # Una fuente del taller puede contener escenarios o periodos incompletos.
+    # No declarar como REAL sin verificacion explicita de procedencia.
     # Siempre usar la serie completa; ninguna selección anterior filtra clientes.
-    render_workshop(raw, workshop_mapping, horizon, declared_real=True)
+    render_workshop(raw, workshop_mapping, horizon, declared_real=False)
     st.stop()
 
 try:

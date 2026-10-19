@@ -130,32 +130,61 @@ def sample_weights(anchors, recent=False):
     return weights.astype(np.float32)
 
 
-def seasonal_encoding(z, origin, lookback, representation, anchor, periodicity):
-    """Calendario conocido y rezago anual causal; cero + indicador si no existe."""
+def seasonal_encoding(z, origin, lookback, representation, anchor, periodicity,
+                      calendar_offset=0, calendar_extra=False):
+    """Variables conocidas antes del pronóstico. Nunca usan demanda futura.
+
+    La fase se alinea con el calendario real: 0=Enero-Se1 ... 47=Diciembre-Se4.
+    La feria es una indicadora aproximada (Diciembre-Se3 y Se4), no ventas reales.
+    """
     indices = np.arange(origin-lookback+1, origin+1)
     offset, factor = anchor if representation == "local" else (anchor, 1.)
     previous = indices-periodicity
     available = previous >= 0
     lag = np.zeros(lookback)
     lag[available] = (z[previous[available]]-offset)/factor
-    phase = 2*np.pi*indices/periodicity
-    return np.column_stack((np.sin(phase), np.cos(phase), lag, available.astype(float)))
+    phase = 2*np.pi*(indices + calendar_offset)/periodicity
+    features = [np.sin(phase), np.cos(phase), lag, available.astype(float)]
+    if calendar_extra:
+        if periodicity != 48:
+            raise ValueError("La codificación de ferias requiere 48 períodos por año.")
+        within_year = (indices + calendar_offset) % 48
+        month = within_year // 4  # Enero=0, Diciembre=11
+        segment = within_year % 4  # Se1=0, Se4=3
+        fair = ((month == 11) & (segment >= 2)).astype(float)
+        low_season = (month <= 1).astype(float)
+        features.extend([np.sin(2*phase), np.cos(2*phase), fair, low_season])
+    return np.column_stack(features)
 
 
-def scaled_windows(y, fit_end, lookback, horizon, representation, periodicity=None):
+def scaled_windows(y, fit_end, lookback, horizon, representation, periodicity=None,
+                   calendar_offset=0, calendar_extra=False):
     """Escala aprendida en prefijo. Cambio predice desplazamientos desde último valor."""
     center = float(np.mean(y[:fit_end]))
     scale = float(np.std(y[:fit_end]))
     if scale < 1e-8:
         scale = max(abs(center)*1e-6, 1.)
     z = (y-center)/scale
-    origins = np.arange(lookback, len(y)-horizon+1)
+    if representation == "estacional":
+        if periodicity is None:
+            raise ValueError("La representación estacional necesita un ciclo definido.")
+        first_origin = max(lookback, periodicity)
+    else:
+        first_origin = lookback
+    origins = np.arange(first_origin, len(y)-horizon+1)
     x, target, anchors = [], [], []
     for origin in origins:
         lag = z[origin-lookback:origin]
-        encoded, anchor = window_encoding(lag, representation)
+        if representation == "estacional":
+            # y[t-period] ya era conocido cuando se pronostica y[t].
+            # El unico modelo que aprende la correccion es la LSTM.
+            anchor = float(z[origin-periodicity])
+            encoded = np.column_stack((lag-anchor, np.r_[0., np.diff(lag)]))
+        else:
+            encoded, anchor = window_encoding(lag, representation)
         if periodicity is not None:
-            encoded = np.column_stack((encoded, seasonal_encoding(z, origin, lookback, representation, anchor, periodicity)))
+            encoded = np.column_stack((encoded, seasonal_encoding(z, origin, lookback, representation, anchor, periodicity,
+                                                                         calendar_offset, calendar_extra)))
         x.append(encoded)
         offset, factor = (anchor[0], anchor[1]) if representation == "local" else (anchor, 1.)
         target.append((z[origin:origin+horizon]-offset)/factor)
@@ -166,11 +195,19 @@ def scaled_windows(y, fit_end, lookback, horizon, representation, periodicity=No
     return (*arrays, origins, np.asarray(anchors), center, scale)
 
 
-def future_input(y, lookback, representation, center, scale, periodicity=None):
+def future_input(y, lookback, representation, center, scale, periodicity=None,
+                 calendar_offset=0, calendar_extra=False):
     lag = (y[-lookback:]-center)/scale
-    encoded, anchor = window_encoding(lag, representation)
+    if representation == "estacional":
+        if periodicity is None or len(y) < periodicity:
+            raise ValueError("Falta un ciclo previo para pronosticar.")
+        anchor = float((y[-periodicity]-center)/scale)
+        encoded = np.column_stack((lag-anchor, np.r_[0., np.diff(lag)]))
+    else:
+        encoded, anchor = window_encoding(lag, representation)
     if periodicity is not None:
-        encoded = np.column_stack((encoded, seasonal_encoding((np.asarray(y)-center)/scale, len(y), lookback, representation, anchor, periodicity)))
+        encoded = np.column_stack((encoded, seasonal_encoding((np.asarray(y)-center)/scale, len(y), lookback, representation,
+                                                                     anchor, periodicity, calendar_offset, calendar_extra)))
     x = encoded[None].astype(np.float32)
     return x, anchor
 
@@ -178,13 +215,17 @@ def future_input(y, lookback, representation, center, scale, periodicity=None):
 def build_network(candidate, config, seed):
     import tensorflow as tf
     tf.keras.utils.set_random_seed(seed)
+    feature_count = 2 + (4 if candidate.get("periodicity") else 0) + (4 if candidate.get("calendar_extra") else 0)
     model = tf.keras.Sequential([
-        tf.keras.layers.Input((candidate["lookback"], 6 if candidate.get("periodicity") else 2)),
+        tf.keras.layers.Input((candidate["lookback"], feature_count)),
         tf.keras.layers.LSTM(candidate["units"]),
         tf.keras.layers.Dropout(config.dropout),
         tf.keras.layers.Dense(config.horizon, kernel_initializer="zeros"),
     ])
-    model.compile(optimizer=tf.keras.optimizers.Adam(config.learning_rate, clipnorm=1.), loss="mse")
+    # Huber limita la influencia de errores extraordinarios en TRAIN.
+    # El objetivo observado, la predicción y las métricas no se modifican.
+    loss = tf.keras.losses.Huber(delta=1.0) if candidate.get("loss") == "huber" else "mse"
+    model.compile(optimizer=tf.keras.optimizers.Adam(config.learning_rate, clipnorm=1.), loss=loss)
     return model
 
 

@@ -1,327 +1,95 @@
-"""Interfaz de pronóstico dual para la tesis. Ejecutar: streamlit run dual_app.py"""
-from dataclasses import asdict
-from hashlib import sha256
+"""Pronóstico de demanda: dos redes LSTM independientes."""
 from io import BytesIO
-
+from hashlib import sha256
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import streamlit as st
+from forecast_engine import period_positions, future_labels
+from thesis_engine import ThesisConfig, run_thesis, finalize_test
 
-from dual_forecast import prepare_dual, combined_forecast, combined_test
-from forecast_engine import future_labels
-from thesis_engine import ThesisConfig, run_thesis, finalize_test, ENGINE_VERSION
-from seasonal_diagnostics import profile_temporal
-from validation_audit import validation_error_audit, validation_error_summary, validation_error_priority
+st.set_page_config(page_title="Pronóstico de demanda",page_icon="📈",layout="wide")
+st.title("Pronóstico de demanda de pantalones jeans")
+st.write("Modelos LSTM para maquila y corte propio.")
 
-APP_VERSION = "dual-lstm-v8.1-descargas-visibles-20261019"
-st.set_page_config(page_title="LSTM | Maquila y corte propio", page_icon="📈", layout="wide")
-st.title("Pronóstico LSTM: maquila y corte propio")
-st.caption(f"Dos redes independientes · Total = suma · 48 períodos por año · Motor {ENGINE_VERSION} · {APP_VERSION}")
-
-uploaded = st.file_uploader("Excel de demanda del taller", type=["xlsx"])
+uploaded=st.file_uploader("Excel de demanda", type=["xlsx"])
 if uploaded is None:
-    st.info("Carga DEMANDA_JEANS_TESIS.xlsx y selecciona la hoja 01_DEMANDA_LSTM.")
+    st.info("Carga el archivo de demanda de una hoja para comenzar.")
     st.stop()
-content = uploaded.getvalue()
 try:
-    excel = pd.ExcelFile(BytesIO(content))
-    sheet = st.selectbox("Hoja de demanda", excel.sheet_names,
-                         index=excel.sheet_names.index("01_DEMANDA_LSTM") if "01_DEMANDA_LSTM" in excel.sheet_names else 0)
-    raw = pd.read_excel(BytesIO(content), sheet_name=sheet, header=4)
-    series = prepare_dual(raw)
+    frame=pd.read_excel(BytesIO(uploaded.getvalue()),sheet_name=0,header=3)
+    cols=["Periodo (4/mes)","DEMANDA MAQUILA LSTM","DEMANDA CORTE LSTM"]
+    if any(c not in frame.columns for c in cols):
+        raise ValueError("Faltan columnas del archivo de demanda.")
+    frame=frame.dropna(subset=[cols[0]]).reset_index(drop=True)
+    periods=frame[cols[0]].astype(str).str.strip()
+    positions=period_positions(periods)
+    if positions is None or not np.all(np.diff(positions)==1):
+        raise ValueError("Los períodos no son consecutivos.")
+    series={}
+    for title,col in (("Maquila",cols[1]),("Corte propio",cols[2])):
+        x=pd.to_numeric(frame[col],errors="coerce")
+        start=0
+        if title=="Corte propio":
+            found=np.flatnonzero(x.notna().to_numpy())
+            if not len(found):
+                raise ValueError("No hay demanda de corte propio.")
+            start=int(found[0])
+        x=x.iloc[start:]
+        if not np.isfinite(x).all() or (x<0).any():
+            raise ValueError(f"{title}: faltan valores o hay demandas inválidas.")
+        series[title]=pd.DataFrame({
+            "periodo":periods.iloc[start:].to_numpy(),
+            "demanda":x.to_numpy(float),
+            "origen":"SIN_DECLARAR",
+        })
 except Exception as exc:
-    st.error(f"No se pudo preparar la base dual: {exc}")
+    st.error(f"No se pudo cargar el Excel: {exc}")
     st.stop()
 
-a, b = series["Maquila"], series["Corte propio"]
-common = a.merge(b, on="periodo", suffixes=("_maquila", "_corte"), how="inner", validate="one_to_one")
-st.success(f"Histórico cargado: {len(a)} períodos de maquila y {len(b)} de corte propio; "
-           f"{len(common)} períodos compartidos. Último: {a.periodo.iloc[-1]}.")
-st.subheader("Demanda histórica por modalidad")
-preview = pd.DataFrame({
-    "Período": a.periodo,
-    "Maquila": a.demanda,
-})
-own = b.rename(columns={"periodo": "Período", "demanda": "Corte propio"})[["Período", "Corte propio"]]
-preview = preview.merge(own, on="Período", how="left", validate="one_to_one")
-preview["Total"] = preview["Maquila"] + preview["Corte propio"].fillna(0)
-st.dataframe(preview, hide_index=True, use_container_width=True)
-st.caption("Las celdas vacías de corte propio corresponden a fechas anteriores al inicio de esa modalidad; "
-           "el total de esas fechas refleja solo maquila.")
-with st.expander("Calidad de los datos y notas metodológicas", expanded=False):
-    st.write("El histórico combina registros disponibles y períodos reconstruidos. Las métricas obtenidas "
-             "sobre esos períodos son descriptivas y no sustituyen una validación independiente con "
-             "ventas y pedidos verificables.")
-    report = pd.DataFrame({
-        "Modalidad": ["Maquila", "Corte propio"],
-        "Períodos históricos": [len(a), len(b)],
-        "Registrados completos": [int(a.origen.eq("REAL").sum()), int(b.origen.eq("REAL").sum())],
-        "Estimados": [int(a.origen.eq("IMPUTADO").sum()), int(b.origen.eq("IMPUTADO").sum())],
-        "Parciales o no clasificados": [
-            int(a.origen.isin(["MIXTO", "SIN_DECLARAR"]).sum()),
-            int(b.origen.isin(["MIXTO", "SIN_DECLARAR"]).sum()),
-        ],
-    })
-    st.dataframe(report, hide_index=True, use_container_width=True)
+st.success(f"Histórico cargado hasta {periods.iloc[-1]}.")
+st.caption("Los resultados reflejan el conjunto cargado; si se utiliza una base sintética, "
+           "las proyecciones son escenarios de planificación, no pedidos reales comprobados.")
 
 with st.sidebar:
-    st.header("Configuración LSTM")
-    horizon = st.number_input("Períodos futuros (4 por mes)", 1, 24, 8)
-    auto = st.checkbox("Optimización por validación temporal", value=True)
-    seasonal_exp = st.checkbox("Experimento estacional: feria y calendario", value=True,
-                               help="Compara opciones estacionales con la LSTM base; no modifica demanda.")
-    robust_trial = st.checkbox("Probar variantes LSTM con pérdida Huber (experimental)", value=False,
-                               help="Añade siete candidatos LSTM con pérdida robusta. No modifica los datos.")
-    lookback = st.number_input("Ventana histórica", 2, 24, 8)
-    epochs = st.number_input("Épocas máximas", 20, 500, 120, step=20)
-    units = st.selectbox("Unidades de la red", [8, 16, 24, 32], index=1)
-    seed = st.number_input("Semilla", 0, 2147483647, 42)
-    st.caption("TRAIN, validación y TEST comparten el mismo corte temporal por modalidad.")
-    train = st.slider("TRAIN (%)", 60, 80, 70)
-    val = st.slider("Validación (%)", 10, 25, 15)
-    if train + val > 95:
-        st.error("Deja al menos 5 % para TEST.")
-        st.stop()
+    st.header("Configuración")
+    h=st.number_input("Períodos futuros",1,24,12)
+    epochs=st.number_input("Épocas máximas",40,500,120,step=20)
+    seed=st.number_input("Semilla",0,2147483647,42)
 
-config = ThesisConfig(horizon=int(horizon), automatic=auto, lookback=int(lookback), units=int(units),
-                      epochs=int(epochs), periodicity=48, seed=int(seed),
-                      train_ratio=train/100, validation_ratio=val/100, calendar_experiment=seasonal_exp, robust_experiment=robust_trial)
-signature = sha256(content + str(sheet).encode() + repr(asdict(config)).encode() +
-                   ENGINE_VERSION.encode() + APP_VERSION.encode()).hexdigest()
-if st.session_state.get("dual_signature") != signature:
-    st.session_state["dual_signature"] = signature
-    st.session_state.pop("dual_results", None)
-    st.session_state.pop("dual_finalized", None)
-    st.session_state.pop("dual_test_locked", None)
+signature=sha256(uploaded.getvalue()+f"{h}-{epochs}-{seed}".encode()).hexdigest()
+if st.session_state.get("firma_pronostico")!=signature:
+    st.session_state["firma_pronostico"]=signature
+    st.session_state.pop("resultado_pronostico",None)
 
-if st.button("1. Entrenar ambas LSTM y revisar validación", type="primary"):
-    st.session_state.pop("dual_results", None)
-    st.session_state.pop("dual_finalized", None)
+if st.button("Generar pronóstico",type="primary"):
+    config=ThesisConfig(horizon=int(h),epochs=int(epochs),seed=int(seed),
+                        periodicity=48,automatic=True,seasonal_features=True,
+                        calendar_experiment=True)
+    results={}
     try:
-        outputs = {}
-        for name, data in series.items():
-            with st.spinner(f"Entrenando {name}; reservando TEST…"):
-                labels = future_labels(data, config.horizon)
-                outputs[name] = run_thesis(data, config, future_periods=labels, evaluate_test=False)
-        st.session_state["dual_results"] = outputs
-        st.success("Ambas redes se entrenaron. Revisa la validación antes de evaluar TEST.")
+        for title,s in series.items():
+            with st.spinner(f"Calculando pronóstico de {title}…"):
+                labels=future_labels(s,int(h))
+                r=run_thesis(s,config,future_periods=labels,evaluate_test=False)
+                r=finalize_test(r)
+                results[title]=r["forecast"][["Periodo","Horizonte","LSTM"]].copy()
+        left=results["Maquila"].rename(columns={"LSTM":"Maquila"})
+        right=results["Corte propio"].rename(columns={"LSTM":"Corte propio"})
+        both=left.merge(right,on=["Periodo","Horizonte"],validate="one_to_one")
+        both["Total"]=both["Maquila"]+both["Corte propio"]
+        st.session_state["resultado_pronostico"]=both
     except Exception as exc:
-        st.error(f"Falló el entrenamiento: {exc}")
-        st.stop()
+        st.error(f"No se pudo generar el pronóstico: {exc}")
 
-results = st.session_state.get("dual_results")
-if results:
-    # Descargas situadas al PRINCIPIO de los resultados, sin tener que buscar
-    # después de tablas largas. No se abre TEST ni se modifica el histórico.
-    st.subheader("📥 Descargar auditoría de VALIDACIÓN")
-    st.caption("Los archivos contienen únicamente los períodos de VALIDACIÓN "
-               "y distinguen REAL, IMPUTADO, MIXTO y SIN_DECLARAR.")
-    audit_files = {}
-    for name, result in results.items():
-        detail = validation_error_audit(result)
-        audit_files[name] = (
-            detail,
-            validation_error_summary(detail),
-            validation_error_priority(detail),
-        )
-    col_mq, col_ct = st.columns(2)
-    with col_mq:
-        st.download_button(
-            "⬇️ Descargar MAQUILA (CSV)",
-            data=audit_files["Maquila"][0].to_csv(index=False, sep=";").encode("utf-8-sig"),
-            file_name="AUDITORIA_MAQUILA_VALIDACION.csv",
-            mime="text/csv", key="audit_mq_csv", use_container_width=True)
-    with col_ct:
-        st.download_button(
-            "⬇️ Descargar CORTE PROPIO (CSV)",
-            data=audit_files["Corte propio"][0].to_csv(index=False, sep=";").encode("utf-8-sig"),
-            file_name="AUDITORIA_CORTE_VALIDACION.csv",
-            mime="text/csv", key="audit_ct_csv", use_container_width=True)
-    try:
-        audit_buffer = BytesIO()
-        with pd.ExcelWriter(audit_buffer, engine="openpyxl") as writer:
-            for name, (detail, summary, priority) in audit_files.items():
-                label = "Maquila" if name == "Maquila" else "Corte"
-                detail.to_excel(writer, sheet_name=f"{label}_periodos", index=False)
-                summary.to_excel(writer, sheet_name=f"{label}_resumen", index=False)
-                priority.to_excel(writer, sheet_name=f"{label}_prioridad", index=False)
-        st.download_button(
-            "📥 DESCARGAR AUDITORÍA COMPLETA (EXCEL)",
-            data=audit_buffer.getvalue(),
-            file_name="AUDITORIA_VALIDACION_LSTM.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary", key="audit_full_xlsx", use_container_width=True)
-    except Exception as exc:
-        st.warning("No se pudo crear el Excel de auditoría: "
-                   f"{exc}. Puedes descargar los dos CSV de arriba.")
-    st.divider()
-    st.subheader("Validación temporal (para seleccionar configuración)")
-    vrows = []
-    for name, result in results.items():
-        frame = result["split_metrics"]
-        for _, line in frame.loc[(frame.Grupo == "VALIDATION") & (frame.Modelo == "LSTM")].iterrows():
-            vrows.append({"Modalidad": name, **line.to_dict()})
-    if vrows:
-        st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-    st.caption("La validación se utiliza para seleccionar configuración. No constituye prueba independiente.")
-    with st.expander("Auditoría temporal y calidad de los datos (sin abrir TEST)", expanded=True):
-        diag_rows = []
-        for name, data in series.items():
-            p = profile_temporal(data, train_ratio=config.train_ratio,
-                                 val_ratio=config.validation_ratio, period=config.periodicity)
-            base = p["ESTACIONAL_TODOS_DESCRIPTIVO"]
-            observed = p["ESTACIONAL_SOLO_REAL"]
-            diag_rows.append({
-                "Modalidad": name, "Períodos": p["N_total"],
-                "Observaciones REAL": p["REAL_TOTAL"],
-                "REAL en validación": p["REAL_VALIDACION"],
-                "Imputados": p["IMPUTADO_TOTAL"], "Mixtos": p["MIXTO_TOTAL"],
-                "Correlación anual TRAIN": p["CORR_ANUAL_TRAIN"],
-                "R² estacional descriptivo": base["R2"],
-                "R² estacional SOLO_REAL": observed["R2"],
-            })
-        st.dataframe(pd.DataFrame(diag_rows).round(3), hide_index=True, use_container_width=True)
-        st.warning("El R² sobre períodos reconstruidos o sintéticos es descriptivo. "
-                   "No acredita capacidad predictiva de pedidos observados. "
-                   "TEST permanece reservado.")
-    with st.expander("Auditoría de errores por período — SOLO VALIDACIÓN", expanded=True):
-        st.caption("No se consulta TEST ni se modifican los pedidos. Los cambios de demanda mostrados "
-                   "son diagnósticos retrospectivos y no variables usadas por la red.")
-        for name, (detail_audit, summary_audit, priority_audit) in audit_files.items():
-            st.markdown(f"**{name}: resumen por origen**")
-            st.dataframe(summary_audit.round(3), hide_index=True, use_container_width=True)
-            st.markdown(f"**{name}: 10 períodos que más contribuyen al error**")
-            st.dataframe(priority_audit.round(3), hide_index=True, use_container_width=True)
-        st.caption("Las descargas de Excel y CSV están ARRIBA de la tabla de validación.")
-        st.warning("Los objetivos MIXTO e IMPUTADO no son observaciones reales completas. "
-                   "La auditoría identifica diferencias; no demuestra automáticamente si un registro es incorrecto.")
-    with st.expander("Diagnóstico: configuración elegida y variantes estacionales", expanded=True):
-        selected_rows = []
-        for name, result in results.items():
-            selected = result["selected"]
-            season = ("Ferias y calendario" if selected.get("calendar_extra") else
-                      "Ciclo anual básico" if selected.get("periodicity") else "Sin estacionalidad")
-            selected_rows.append({
-                "Modalidad": name,
-                "Variante seleccionada": selected.get("Variante"),
-                "Representación": selected["representation"],
-                "Ventana": selected["lookback"],
-                "Unidades": selected["units"],
-                "Pérdida": selected.get("loss", "mse"),
-                "Características": season,
-                "Objetivos de validación": result["selection_scope"],
-                "Candidatas examinadas": len(result["search"]),
-            })
-        st.dataframe(pd.DataFrame(selected_rows), hide_index=True, use_container_width=True)
-        if seasonal_exp:
-            for row in selected_rows:
-                if row["Características"] != "Ferias y calendario":
-                    st.info(f"{row['Modalidad']}: se evaluaron características de feria/calendario, "
-                            "pero la optimización seleccionó otra arquitectura. "
-                            "Activar el experimento no garantiza que el ganador use esas variables.")
-        for name, result in results.items():
-            st.markdown(f"**Opciones mejor puntuadas — {name}**")
-            ranking = result["search"].head(8).copy()
-            shown = [k for k in ("Variante", "representation", "lookback", "units",
-                                  "periodicity", "calendar_extra", "loss", "RMSE_validacion",
-                                  "MAE_validacion", "Cortes_utilizados") if k in ranking.columns]
-            st.dataframe(ranking[shown].round(3), hide_index=True, use_container_width=True)
-        st.caption("El RMSE de búsqueda resume los cortes de validación usados en la selección; "
-                   "puede diferir del RMSE del último corte mostrado arriba. "
-                   "Ninguno es una evaluación independiente sobre TEST.")
-    with st.expander("Comparar LSTM con modelos de referencia (VALIDACIÓN)", expanded=True):
-        for name, result in results.items():
-            st.markdown(f"**{name}**")
-            val = result["split_metrics"]
-            val = val.loc[val.Grupo == "VALIDATION"].copy()
-            if not val.empty:
-                cols = [c for c in ["Modelo", "Alcance", "N", "MAE", "RMSE", "R2", "Sesgo"] if c in val.columns]
-                st.dataframe(val[cols].sort_values(["RMSE", "MAE"]).round(3),
-                             hide_index=True, use_container_width=True)
-                lstm = val.loc[val.Modelo == "LSTM"].iloc[0]
-                best = val.sort_values(["RMSE", "MAE"]).iloc[0]
-                if best.Modelo != "LSTM":
-                    st.info(f"En {name}, el menor RMSE de validación corresponde a "
-                            f"{best.Modelo} ({best.RMSE:.2f}), frente a "
-                            f"{lstm.RMSE:.2f} de LSTM. Conviene estudiar esta diferencia.")
-            detail = result.get("validation_detail")
-            if isinstance(detail, pd.DataFrame) and not detail.empty:
-                chart_cols = [c for c in ["Real", "LSTM", "Naive", "Ridge", "Naive estacional"]
-                              if c in detail.columns]
-                graph = detail.melt(id_vars=["Periodo"], value_vars=chart_cols,
-                                    var_name="Modelo", value_name="Pantalones")
-                st.plotly_chart(px.line(graph, x="Periodo", y="Pantalones", color="Modelo",
-                                        markers=True, title=f"Valores y pronósticos: {name}"),
-                                use_container_width=True)
-    st.caption("No ajustes el modelo utilizando TEST. La diferencia entre modalidades "
-               "puede reflejarse en el número de períodos y su cobertura documental.")
-
-    if not st.session_state.get("dual_finalized"):
-        if st.session_state.get("dual_test_locked"):
-            st.warning("Este TEST ya fue abierto en esta sesión. Para una evaluación independiente, reserva nuevos datos.")
-        elif st.button("2. Evaluar TEST final y pronosticar"):
-            # Bloqueo antes de calcular: si falla a medias, evitar reutilizar el mismo TEST.
-            st.session_state["dual_test_locked"] = True
-            try:
-                finalized = {}
-                for name, result in results.items():
-                    with st.spinner(f"Evaluación final y pronóstico: {name}…"):
-                        finalized[name] = finalize_test(result)
-                st.session_state["dual_results"] = finalized
-                st.session_state["dual_finalized"] = True
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Falló la evaluación final: {exc}")
-                st.stop()
-
-if st.session_state.get("dual_finalized"):
-    ares, bres = st.session_state["dual_results"]["Maquila"], st.session_state["dual_results"]["Corte propio"]
-    try:
-        future = combined_forecast(ares["forecast"], bres["forecast"])
-        comparison, total_metrics, observed_metrics, observed_n = combined_test(ares["detail"], bres["detail"])
-    except Exception as exc:
-        st.error(f"Fallo de conciliación: {exc}")
-        st.stop()
-    st.subheader("Pronósticos futuros LSTM")
-    st.dataframe(future.round(2), hide_index=True, use_container_width=True)
-    graph = future.melt(id_vars="Periodo", value_vars=["Maquila", "Corte propio", "Total"],
-                        var_name="Modalidad", value_name="Unidades")
-    st.plotly_chart(px.line(graph, x="Periodo", y="Unidades", color="Modalidad", markers=True,
-                            title="Pronósticos separados y demanda total"), use_container_width=True)
-    st.caption("Los resultados pueden ser decimales; para planificar unidades enteras, aplica una política de redondeo después de la suma.")
-
-    st.subheader("Evaluación TEST por modalidad")
-    rows = []
-    for name, result in st.session_state["dual_results"].items():
-        for _, metric in result["metrics_all"].loc[result["metrics_all"].Modelo == "LSTM"].iterrows():
-            rows.append({"Modalidad": name, "Alcance": "Todos los objetivos (incluye escenarios)", **metric.to_dict()})
-        real = result["metrics_real"]
-        if not real.empty:
-            for _, metric in real.loc[real.Modelo == "LSTM"].iterrows():
-                rows.append({"Modalidad": name, "Alcance": "Solo objetivos REAL", **metric.to_dict()})
-    rows.append({"Modalidad": "Total", "Alcance": "Todos los objetivos (incluye escenarios)",
-                 "Modelo": "Suma LSTM", **total_metrics})
-    if observed_metrics is not None:
-        rows.append({"Modalidad": "Total", "Alcance": f"Solo ambas modalidades REAL (N={observed_n})",
-                     "Modelo": "Suma LSTM", **observed_metrics})
-    else:
-        st.warning("No hay al menos dos períodos de TEST con ambas demandas totalmente observadas; "
-                   "las métricas del total son DESCRIPTIVAS, no validación sobre demanda real.")
-    scores = pd.DataFrame(rows)
-    st.dataframe(scores, hide_index=True, use_container_width=True)
-    st.subheader("Prueba final del total")
-    st.dataframe(comparison, hide_index=True, use_container_width=True)
-
-    st.subheader("Exportar informe")
-    st.caption("Incluye pronóstico, prueba conjunta, métricas y fuente de los datos sin convertir simulaciones en registros reales.")
-    with BytesIO() as buffer:
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            future.to_excel(writer, sheet_name="Pronosticos", index=False)
-            scores.to_excel(writer, sheet_name="Metricas", index=False)
-            comparison.to_excel(writer, sheet_name="Prueba_total", index=False)
-            preview.to_excel(writer, sheet_name="Trazabilidad", index=False)
-        payload = buffer.getvalue()
-    st.download_button("Descargar resultados duales (.xlsx)", data=payload,
-                       file_name="PRONOSTICO_DUAL_LSTM_TESIS.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+out=st.session_state.get("resultado_pronostico")
+if out is not None:
+    st.subheader("Demanda pronosticada")
+    view=out.copy()
+    for col in ("Maquila","Corte propio","Total"):
+        view[col]=view[col].round().astype(int)
+    st.dataframe(view,hide_index=True,use_container_width=True)
+    st.line_chart(out.set_index("Periodo")[["Maquila","Corte propio"]])
+    st.caption("Los totales se calculan con decimales y se redondean al presentar.")
+    st.download_button("Descargar pronósticos (CSV)",
+                       out.to_csv(index=False,sep=";").encode("utf-8-sig"),
+                       file_name="PRONOSTICO_LSTM.csv",mime="text/csv")

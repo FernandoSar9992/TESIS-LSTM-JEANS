@@ -139,6 +139,13 @@ def calendar_start_offset(data):
     import re
     months = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
               "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+    if "fecha_inicio" in data.columns:
+        start = pd.Timestamp(data["fecha_inicio"].iloc[0])
+        if pd.isna(start) or start.weekday() != 0:
+            raise ValueError("Fecha de inicio semanal inválida.")
+        # Anclaje aproximado para ciclo estacional de 52 semanas.
+        # En años ISO de 53 semanas se produce un desplazamiento anual.
+        return int(start.isocalendar().week) - 1
     label = str(data.periodo.iloc[0]).strip().lower()
     match = re.fullmatch(r"([a-záéíóúñ]+)\s+\d{4}-se([1-4])", label)
     if not match or match.group(1) not in months:

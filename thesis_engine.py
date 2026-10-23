@@ -36,6 +36,7 @@ class ThesisConfig:
     refit_future: bool = True
     calendar_experiment: bool = False
     robust_experiment: bool = False
+    adaptive_search: bool = False
 
     def validate(self):
         if not .5 <= self.train_ratio <= .85 or not .05 <= self.validation_ratio <= .3 or self.train_ratio+self.validation_ratio > .95:
@@ -160,6 +161,54 @@ def candidates(config, earliest, calendar_offset=0, latest_training=None):
         return [{"lookback": config.lookback, "units": config.units, "dropout": config.dropout, "representation": config.representation,
                  "periodicity": config.periodicity if config.seasonal_features else None,
                  "calendar_offset": calendar_offset, "calendar_extra": config.calendar_experiment and config.seasonal_features}]
+    if config.adaptive_search:
+        # Shortlist amplia pero contenida: ventanas cortas para cambios rápidos,
+        # largas para tendencia, robustez frente a picos y ponderación reciente.
+        # La selección usa SOLO cortes de validación cronológicos.
+        plans = [
+            ("local", 2, 8, False, "mse", None),
+            ("local", 4, 8, False, "mse", None),
+            ("local", 8, 16, False, "mse", None),
+            ("local", 12, 16, False, "mse", None),
+            ("local", 16, 16, False, "mse", None),
+            ("local", 24, 16, False, "mse", None),
+            ("nivel", 2, 8, False, "mse", None),
+            ("nivel", 4, 8, False, "mse", None),
+            ("nivel", 8, 16, False, "mse", None),
+            ("nivel", 16, 16, False, "mse", None),
+            ("nivel", 24, 16, False, "mse", None),
+            ("cambio", 4, 8, False, "mse", None),
+            ("cambio", 8, 16, False, "mse", None),
+            ("cambio", 12, 16, False, "mse", None),
+            ("local", 2, 8, True, "mse", None),
+            ("local", 4, 8, True, "mse", None),
+            ("local", 8, 16, True, "mse", None),
+            ("local", 16, 16, True, "mse", None),
+            ("local", 24, 16, True, "mse", None),
+            ("local", 4, 8, False, "huber", None),
+            ("local", 8, 16, False, "huber", None),
+            ("local", 16, 16, False, "huber", None),
+            ("local", 8, 16, True, "huber", None),
+        ]
+        if config.seasonal_features and latest_training is not None and latest_training >= config.periodicity+8:
+            plans.extend([
+                ("local", 8, 8, False, "mse", config.periodicity),
+                ("local", 16, 16, False, "mse", config.periodicity),
+                ("local", 8, 8, True, "huber", config.periodicity),
+                ("estacional", 8, 8, False, "mse", config.periodicity),
+            ])
+        result = [
+            {"lookback": lb, "units": units, "dropout": .1,
+             "representation": mode, "recent": recent,
+             "loss": loss, "periodicity": cycle,
+             "calendar_offset": calendar_offset, "calendar_extra": False}
+            for mode, lb, units, recent, loss, cycle in plans
+            if earliest-lb >= 20 and (mode != "estacional" or
+                                      earliest >= config.periodicity+8)
+        ]
+        if not result:
+            raise ValueError("No hay suficientes semanas para la búsqueda LSTM.")
+        return result
     windows = [4, 8, 12] + ([16, 24] if config.extended_windows else [])
     modes = ["local", "nivel", "cambio"] if config.auto_representation else [config.representation]
     options = [{"lookback": lb, "units": units, "dropout": dropout, "representation": mode, "periodicity": None}
@@ -220,7 +269,7 @@ def fit_candidate(y, data, fit_end, stop, candidate, config, seed):
     callbacks = [tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=config.patience, restore_best_weights=True), tf.keras.callbacks.TerminateOnNaN()]
     if config.reduce_lr:
         callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=.5, patience=8, min_lr=1e-6))
-    history = fit_arrays(model, x[train], targets[train], sample_weights(anchors[train]),
+    history = fit_arrays(model, x[train], targets[train], sample_weights(anchors[train], candidate.get("recent", False)),
                          config, callbacks, validation=(x[val_indices], targets[val_indices], sample_weights(anchors[val_indices])))
     if not np.isfinite(history["loss"]).all() or not np.isfinite(history["val_loss"]).all():
         raise ValueError("El entrenamiento produjo una pérdida no finita.")
@@ -367,11 +416,12 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         rmse = float(np.mean([s["scores"]["RMSE"] for s in usable]))
         scopes = {s["scope"] for s in usable}
         scope = next(iter(scopes)) if len(scopes) == 1 else "REAL_Y_SIN_TRAZABILIDAD"
-        rows.append({"Variante": number, **candidate, "epochs": fitted["epochs"], "MAE_validacion": mae, "RMSE_validacion": rmse,
+        selected_epochs = max(1, int(np.median([fold["epochs"] for fold in scores])))
+        rows.append({"Variante": number, **candidate, "epochs": selected_epochs, "MAE_validacion": mae, "RMSE_validacion": rmse,
                      "Cortes_utilizados": len(usable), "Alcance": scope})
         if best_key is None or (rmse, mae) < best_key:
             best_key, best = (rmse, mae), None
-            selected = {**candidate, "epochs": fitted["epochs"], "Variante": number, "selection_scope": scope}
+            selected = {**candidate, "epochs": selected_epochs, "Variante": number, "selection_scope": scope}
     # El mejor candidato pudo provenir de otro fold: reajustar sobre TRAIN,
     # antes de reportar validacion; ningun objetivo TEST se utiliza.
     best = fit_candidate(y, data, tr, va, selected, replace(config, epochs=selected["epochs"]), config.seed)
@@ -523,7 +573,7 @@ def fit_production(result, progress=None):
             progress(f'Reajuste para el futuro con {len(y)} datos: red {member+1}/{config.members}, {config.epochs} épocas fijadas en validación.')
         model = build_network(candidate, config, config.seed+member)
         callbacks = [tf.keras.callbacks.TerminateOnNaN()]
-        history = fit_arrays(model, x, targets, sample_weights(anchors), config, callbacks)
+        history = fit_arrays(model, x, targets, sample_weights(anchors, candidate.get("recent", False)), config, callbacks)
         if not np.isfinite(history['loss']).all():
             raise ValueError('Reajuste futuro inestable.')
         models.append(model)

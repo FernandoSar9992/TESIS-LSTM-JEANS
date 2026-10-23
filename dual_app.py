@@ -51,16 +51,23 @@ if st.session_state.get("firma_pronostico")!=signature:
     st.session_state["firma_pronostico"]=signature
     st.session_state.pop("resultado_pronostico",None)
     st.session_state.pop("metricas_finales",None)
+    st.session_state.pop("comparacion_referencias",None)
+    st.session_state.pop("configuraciones_elegidas",None)
 
 if st.button("Generar pronóstico",type="primary"):
     st.session_state.pop("resultado_pronostico",None)
     st.session_state.pop("metricas_finales",None)
+    st.session_state.pop("comparacion_referencias",None)
+    st.session_state.pop("configuraciones_elegidas",None)
     config=ThesisConfig(horizon=int(h),epochs=int(epochs),seed=int(seed),
                         periodicity=metadata["periodicity"],automatic=True,
-                        seasonal_features=True,calendar_experiment=False)
+                        seasonal_features=True,calendar_experiment=False,
+                        adaptive_search=True)
     results={}
     test_details={}
     test_metrics={}
+    comparisons=[]
+    chosen_configs=[]
     try:
         for title,s in series.items():
             with st.spinner(f"Calculando pronóstico de {title}…"):
@@ -73,6 +80,26 @@ if st.button("Generar pronóstico",type="primary"):
                 if len(score)!=1:
                     raise ValueError(f"{title}: no se encontró una métrica TEST única para LSTM.")
                 test_metrics[title]=score.iloc[0]
+                val=r["split_metrics"]
+                val=val.loc[(val["Grupo"]=="VALIDATION") & val["Modelo"].ne("LSTM")]
+                baseline=val.sort_values(["RMSE","MAE"]).iloc[0]
+                baseline_test=r["metrics"].loc[r["metrics"]["Modelo"].eq(baseline["Modelo"])].iloc[0]
+                comparisons.append({
+                    "Modalidad":title,"Referencia":baseline["Modelo"],
+                    "MAE LSTM":float(score.iloc[0]["MAE"]),
+                    "MAE referencia":float(baseline_test["MAE"]),
+                    "RMSE LSTM":float(score.iloc[0]["RMSE"]),
+                    "RMSE referencia":float(baseline_test["RMSE"]),
+                    "LSTM gana en RMSE":bool(score.iloc[0]["RMSE"] < baseline_test["RMSE"]),
+                })
+                selected=r["selected"]
+                chosen_configs.append({
+                    "Modalidad":title,"Ventana":selected["lookback"],
+                    "Neuronas":selected["units"],"Épocas":selected["epochs"],
+                    "Representación":selected["representation"],
+                    "Pérdida":selected.get("loss","mse"),
+                    "Recencia":bool(selected.get("recent",False)),
+                })
         left=results["Maquila"].rename(columns={"LSTM":"Maquila"})
         right=results["Corte propio"].rename(columns={"LSTM":"Corte propio"})
         both=left.merge(right,on=["Periodo","Horizonte"],validate="one_to_one")
@@ -103,6 +130,8 @@ if st.button("Generar pronóstico",type="primary"):
             })
         st.session_state["resultado_pronostico"]=both
         st.session_state["metricas_finales"]=pd.DataFrame(score_rows)
+        st.session_state["comparacion_referencias"]=pd.DataFrame(comparisons)
+        st.session_state["configuraciones_elegidas"]=pd.DataFrame(chosen_configs)
     except Exception as exc:
         st.error(f"No se pudo generar el pronóstico: {exc}")
 
@@ -131,3 +160,14 @@ if out is not None:
                 "Si es sintética, estas métricas son experimentales y no "
                 "constituyen validación frente a la demanda real del taller. "
                 "La fila Total utiliza solo los períodos TEST comunes.")
+
+    st.subheader("Comparación frente a referencia sencilla")
+    benchmark=st.session_state.get("comparacion_referencias")
+    if benchmark is not None:
+        st.dataframe(benchmark.round(3),hide_index=True,use_container_width=True)
+        st.caption("La referencia se selecciona por VALIDACIÓN, nunca por TEST. "
+                   "En TEST comprobamos si la LSTM la supera en RMSE.")
+    st.subheader("Configuración LSTM elegida")
+    chosen=st.session_state.get("configuraciones_elegidas")
+    if chosen is not None:
+        st.dataframe(chosen,hide_index=True,use_container_width=True)

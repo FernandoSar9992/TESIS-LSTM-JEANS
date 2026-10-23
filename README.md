@@ -26,3 +26,9 @@ El modelo utiliza un ciclo anual **aproximado de 52 semanas** para fechas semana
 La tabla de métricas TEST evalúa períodos históricos reservados, no pronósticos futuros. **Una base sintética, imputada o sin registros verificables únicamente permite una evaluación experimental**, no certificar la precisión real en el taller.
 
 La planificación de producción de corte propio (inventario, reposición y capacidad compartida) será un módulo separado, aún no implementado en esta etapa.
+
+## Mejora de las dos LSTM
+
+Con `adaptive_search=True`, la selección temporal compara ventanas de 2 a 24 semanas, transformaciones local/nivel/cambio, pérdida MSE o Huber, ponderación reciente opcional y algunos modelos estacionales cuando existe historial. Los hiperparámetros se seleccionan únicamente en VALIDACIÓN. El TEST se evalúa después y no modifica la configuración. En pantalla se compara la LSTM con una referencia simple seleccionada por VALIDACIÓN; no se garantiza que la red neuronal la supere.
+
+Respaldo anterior: rama `respaldo-presentacion-antes-optimizacion`. La ejecución integral con TensorFlow debe verificarse en el equipo local.

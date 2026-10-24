@@ -452,10 +452,18 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         ridge_options.append((score["MAE"], score["RMSE"], alpha, ridge))
     _, _, alpha, ridge = min(ridge_options, key=lambda v: (v[1], v[0]))
     splits = []
+    train_detail = None
     for name, origins in (("TRAIN", train_origins), ("VALIDATION", val_origins)):
         predictions = base_predictions(y, origins, ridge, lags, config.periodicity)
         predictions["LSTM"] = predict_observed(models, y[:va], tr, selected, origins)
         splits.append(table_metrics(data, origins, predictions, name)[0])
+        if name == "TRAIN":
+            # Ajuste dentro de muestra, distinto de validación y TEST.
+            train_detail = pd.DataFrame({
+                "Periodo": data.periodo.iloc[origins].to_numpy(),
+                "Real": y[origins],
+                "LSTM": np.asarray(predictions["LSTM"], float),
+            })
     split_table, profile = profile_and_split(data, tr, va, include_test=False)
     processed = data.rename(columns={"periodo": "Periodo", "demanda": "Demanda_utilizada", "demanda_original": "Demanda_original", "origen": "Origen", "tipo_estimacion": "Tipo_estimacion"})
     processed["Grupo"] = ["TRAIN"]*tr + ["VALIDATION"]*(va-tr) + ["TEST"]*(len(data)-va)
@@ -494,6 +502,7 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         "validation_mae": float(val_score["MAE"]),
         "scope": scope,
     }
+    result["train_detail"] = train_detail
     result["validation_detail"] = pd.DataFrame({
         "Periodo": data.periodo.iloc[val_origins].to_numpy(),
         "Real": y[val_origins], **predictions,

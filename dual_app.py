@@ -51,6 +51,7 @@ if st.session_state.get("firma_pronostico")!=signature:
     st.session_state["firma_pronostico"]=signature
     st.session_state.pop("resultado_pronostico",None)
     st.session_state.pop("metricas_finales",None)
+    st.session_state.pop("metricas_etapas",None)
     st.session_state.pop("comparacion_referencias",None)
     st.session_state.pop("configuraciones_elegidas",None)
     st.session_state.pop("decisiones_pronostico",None)
@@ -58,6 +59,7 @@ if st.session_state.get("firma_pronostico")!=signature:
 if st.button("Generar pronóstico",type="primary"):
     st.session_state.pop("resultado_pronostico",None)
     st.session_state.pop("metricas_finales",None)
+    st.session_state.pop("metricas_etapas",None)
     st.session_state.pop("comparacion_referencias",None)
     st.session_state.pop("configuraciones_elegidas",None)
     st.session_state.pop("decisiones_pronostico",None)
@@ -71,6 +73,8 @@ if st.button("Generar pronóstico",type="primary"):
     comparisons=[]
     chosen_configs=[]
     decision_rows=[]
+    stage_details={}
+    stage_rows=[]
     try:
         for title,s in series.items():
             with st.spinner(f"Calculando pronóstico de {title}…"):
@@ -79,6 +83,19 @@ if st.button("Generar pronóstico",type="primary"):
                 r=finalize_test(r)
                 results[title]=r["forecast"][["Periodo","Horizonte","LSTM","Propuesta"]].copy()
                 test_details[title]=r["detail"][["Periodo","Demanda_real","Prediccion_LSTM"]].copy()
+                stage_details[title]={
+                    "TRAIN":r["train_detail"][["Periodo","Real","LSTM"]].copy(),
+                    "VALIDATION":r["validation_detail"][["Periodo","Real","LSTM"]].copy(),
+                    "TEST":r["detail"][["Periodo","Demanda_real","Prediccion_LSTM"]].rename(
+                        columns={"Demanda_real":"Real","Prediccion_LSTM":"LSTM"}).copy(),
+                }
+                for stage,detail in stage_details[title].items():
+                    stage_score=metrics(detail["Real"].to_numpy(float),detail["LSTM"].to_numpy(float))
+                    stage_rows.append({
+                        "Etapa":stage,"Modalidad":title,"Períodos evaluados":len(detail),
+                        "R²":stage_score["R2"],"MAE":stage_score["MAE"],
+                        "RMSE":stage_score["RMSE"],"MAPE (%)":stage_score["MAPE_%"],
+                    })
                 score=r["metrics"].loc[r["metrics"]["Modelo"].eq("LSTM")]
                 if len(score)!=1:
                     raise ValueError(f"{title}: no se encontró una métrica TEST única para LSTM.")
@@ -142,6 +159,21 @@ if st.button("Generar pronóstico",type="primary"):
                 "R²":total_score["R2"],"MAE":total_score["MAE"],
                 "RMSE":total_score["RMSE"],"MAPE (%)":total_score["MAPE_%"],
             })
+        for stage in ("TRAIN","VALIDATION","TEST"):
+            ma=stage_details["Maquila"][stage].rename(columns={"Real":"Real_maquila","LSTM":"Pred_maquila"})
+            cp=stage_details["Corte propio"][stage].rename(columns={"Real":"Real_corte","LSTM":"Pred_corte"})
+            aligned=ma.merge(cp,on="Periodo",how="inner",validate="one_to_one")
+            if len(aligned)>=2:
+                actual=aligned["Real_maquila"].to_numpy(float)+aligned["Real_corte"].to_numpy(float)
+                predicted=aligned["Pred_maquila"].to_numpy(float)+aligned["Pred_corte"].to_numpy(float)
+                stats=metrics(actual,predicted)
+                stage_rows.append({
+                    "Etapa":stage,"Modalidad":"Total (períodos compartidos)",
+                    "Períodos evaluados":len(aligned),
+                    "R²":stats["R2"],"MAE":stats["MAE"],"RMSE":stats["RMSE"],
+                    "MAPE (%)":stats["MAPE_%"],
+                })
+        st.session_state["metricas_etapas"]=pd.DataFrame(stage_rows)
         st.session_state["resultado_pronostico"]=both
         st.session_state["metricas_finales"]=pd.DataFrame(score_rows)
         st.session_state["comparacion_referencias"]=pd.DataFrame(comparisons)
@@ -166,6 +198,23 @@ if out is not None:
                        out.to_csv(index=False,sep=";").encode("utf-8-sig"),
                        file_name="PRONOSTICO_LSTM.csv",mime="text/csv")
 
+    st.divider()
+    st.subheader("Métricas por etapa — LSTM pura")
+    full_scores=st.session_state.get("metricas_etapas")
+    if full_scores is not None:
+        for stage,label in (
+            ("TRAIN","Entrenamiento (TRAIN) — ajuste dentro de muestra"),
+            ("VALIDATION","Validación (VALIDATION) — selección del modelo"),
+            ("TEST","Prueba (TEST) — evaluación histórica reservada"),
+        ):
+            st.markdown(f"**{label}**")
+            part=full_scores.loc[full_scores["Etapa"].eq(stage)].drop(columns="Etapa")
+            st.dataframe(part.round(3),hide_index=True,use_container_width=True)
+        st.caption("TRAIN es ajuste dentro de muestra y tiende a ser optimista. VALIDATION "
+                   "se utilizó para seleccionar la arquitectura. TEST no se usó para escoger "
+                   "parámetros, pero fue consultado durante iteraciones anteriores. "
+                   "El total se calcula únicamente sobre semanas compartidas; "
+                   "las métricas corresponden siempre a LSTM pura.")
     st.divider()
     st.subheader("Métricas finales de evaluación (TEST)")
     scores=st.session_state.get("metricas_finales")

@@ -53,28 +53,31 @@ if st.session_state.get("firma_pronostico")!=signature:
     st.session_state.pop("metricas_finales",None)
     st.session_state.pop("comparacion_referencias",None)
     st.session_state.pop("configuraciones_elegidas",None)
+    st.session_state.pop("decisiones_pronostico",None)
 
 if st.button("Generar pronóstico",type="primary"):
     st.session_state.pop("resultado_pronostico",None)
     st.session_state.pop("metricas_finales",None)
     st.session_state.pop("comparacion_referencias",None)
     st.session_state.pop("configuraciones_elegidas",None)
+    st.session_state.pop("decisiones_pronostico",None)
     config=ThesisConfig(horizon=int(h),epochs=int(epochs),seed=int(seed),
                         periodicity=metadata["periodicity"],automatic=True,
                         seasonal_features=True,calendar_experiment=False,
-                        adaptive_search=True)
+                        adaptive_search=True,recent_validation_weight=True)
     results={}
     test_details={}
     test_metrics={}
     comparisons=[]
     chosen_configs=[]
+    decision_rows=[]
     try:
         for title,s in series.items():
             with st.spinner(f"Calculando pronóstico de {title}…"):
                 labels=future_builder(int(h))
                 r=run_thesis(s,config,future_periods=labels,evaluate_test=False)
                 r=finalize_test(r)
-                results[title]=r["forecast"][["Periodo","Horizonte","LSTM"]].copy()
+                results[title]=r["forecast"][["Periodo","Horizonte","LSTM","Propuesta"]].copy()
                 test_details[title]=r["detail"][["Periodo","Demanda_real","Prediccion_LSTM"]].copy()
                 score=r["metrics"].loc[r["metrics"]["Modelo"].eq("LSTM")]
                 if len(score)!=1:
@@ -93,6 +96,17 @@ if st.button("Generar pronóstico",type="primary"):
                     "LSTM gana en RMSE":bool(score.iloc[0]["RMSE"] < baseline_test["RMSE"]),
                 })
                 selected=r["selected"]
+                mix=r["mixture"]
+                proposal=r["metrics"].loc[r["metrics"]["Modelo"].eq("Propuesta (selección VALIDACIÓN)")].iloc[0]
+                decision_rows.append({
+                    "Modalidad":title,
+                    "Peso LSTM":mix["weight_lstm"],
+                    "Peso referencia":mix["weight_reference"],
+                    "Referencia":mix["reference_model"],
+                    "RMSE TEST LSTM":float(score.iloc[0]["RMSE"]),
+                    "RMSE TEST propuesta":float(proposal["RMSE"]),
+                    "R² TEST propuesta":float(proposal["R2"]),
+                })
                 chosen_configs.append({
                     "Modalidad":title,"Ventana":selected["lookback"],
                     "Neuronas":selected["units"],"Épocas":selected["epochs"],
@@ -100,8 +114,8 @@ if st.button("Generar pronóstico",type="primary"):
                     "Pérdida":selected.get("loss","mse"),
                     "Recencia":bool(selected.get("recent",False)),
                 })
-        left=results["Maquila"].rename(columns={"LSTM":"Maquila"})
-        right=results["Corte propio"].rename(columns={"LSTM":"Corte propio"})
+        left=results["Maquila"].rename(columns={"LSTM":"LSTM maquila","Propuesta":"Maquila"})
+        right=results["Corte propio"].rename(columns={"LSTM":"LSTM corte propio","Propuesta":"Corte propio"})
         both=left.merge(right,on=["Periodo","Horizonte"],validate="one_to_one")
         both["Total"]=both["Maquila"]+both["Corte propio"]
         score_rows=[]
@@ -132,18 +146,22 @@ if st.button("Generar pronóstico",type="primary"):
         st.session_state["metricas_finales"]=pd.DataFrame(score_rows)
         st.session_state["comparacion_referencias"]=pd.DataFrame(comparisons)
         st.session_state["configuraciones_elegidas"]=pd.DataFrame(chosen_configs)
+        st.session_state["decisiones_pronostico"]=pd.DataFrame(decision_rows)
     except Exception as exc:
         st.error(f"No se pudo generar el pronóstico: {exc}")
 
 out=st.session_state.get("resultado_pronostico")
 if out is not None:
-    st.subheader("Demanda pronosticada")
+    st.subheader("Demanda propuesta para planificación")
+    st.caption("La propuesta puede ser una LSTM, una referencia sencilla o su combinación. "
+               "Los pesos se eligen exclusivamente en VALIDACIÓN; no se eligen por TEST.")
     view=out.copy()
     for col in ("Maquila","Corte propio","Total"):
         view[col]=view[col].round().astype(int)
     st.dataframe(view,hide_index=True,use_container_width=True)
     st.line_chart(out.set_index("Periodo")[["Maquila","Corte propio"]])
-    st.caption("Los totales se calculan con decimales y se redondean al presentar.")
+    st.caption("Los totales se calculan con decimales y se redondean al presentar. "
+               "Las columnas LSTM conservan la predicción neuronal sin mezcla.")
     st.download_button("Descargar pronósticos (CSV)",
                        out.to_csv(index=False,sep=";").encode("utf-8-sig"),
                        file_name="PRONOSTICO_LSTM.csv",mime="text/csv")
@@ -167,6 +185,13 @@ if out is not None:
         st.dataframe(benchmark.round(3),hide_index=True,use_container_width=True)
         st.caption("La referencia se selecciona por VALIDACIÓN, nunca por TEST. "
                    "En TEST comprobamos si la LSTM la supera en RMSE.")
+    st.subheader("Método seleccionado en validación")
+    decision=st.session_state.get("decisiones_pronostico")
+    if decision is not None:
+        st.dataframe(decision.round(3),hide_index=True,use_container_width=True)
+        st.caption("Las métricas TEST de la propuesta no son las métricas de la LSTM pura. "
+                   "Como este TEST ya se ha consultado varias veces, los resultados "
+                   "siguen siendo exploratorios hasta una evaluación futura.")
     st.subheader("Configuración LSTM elegida")
     chosen=st.session_state.get("configuraciones_elegidas")
     if chosen is not None:

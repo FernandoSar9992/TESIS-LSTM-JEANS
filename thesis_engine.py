@@ -37,6 +37,7 @@ class ThesisConfig:
     calendar_experiment: bool = False
     robust_experiment: bool = False
     adaptive_search: bool = False
+    recent_validation_weight: bool = False
 
     def validate(self):
         if not .5 <= self.train_ratio <= .85 or not .05 <= self.validation_ratio <= .3 or self.train_ratio+self.validation_ratio > .95:
@@ -412,8 +413,13 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
         # La ausencia de objetivos REAL se documenta; los mismos cortes
         # temporales participan en todas las variantes.
         usable = [s for s in scores if s["eligible"]] or scores
-        mae = float(np.mean([s["scores"]["MAE"] for s in usable]))
-        rmse = float(np.mean([s["scores"]["RMSE"] for s in usable]))
+        # La información cronológicamente más reciente recibe más peso
+        # cuando se solicita; TEST permanece completamente excluido.
+        fold_weights = (np.arange(1, len(usable)+1, dtype=float)**2
+                        if config.recent_validation_weight
+                        else np.ones(len(usable), dtype=float))
+        mae = float(np.average([item["scores"]["MAE"] for item in usable], weights=fold_weights))
+        rmse = float(np.average([item["scores"]["RMSE"] for item in usable], weights=fold_weights))
         scopes = {s["scope"] for s in usable}
         scope = next(iter(scopes)) if len(scopes) == 1 else "REAL_Y_SIN_TRAZABILIDAD"
         selected_epochs = max(1, int(np.median([fold["epochs"] for fold in scores])))
@@ -467,7 +473,32 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
               "_artifacts": {"models": models, "ridge": ridge, "lags": lags, "data": data, "labels": future_periods}}
     # Referencia elegida antes de abrir TEST. No se sustituye ni se renombra como LSTM.
     result["reference_model"] = splits[-1].query("Modelo != 'LSTM'").iloc[0].Modelo
-    result["validation_detail"] = pd.DataFrame({"Periodo": data.periodo.iloc[val_origins].to_numpy(), "Real": y[val_origins], **predictions})
+    # Acordamos LSTM, referencia o combinación en VALIDACIÓN exclusivamente.
+    # Nunca se decide el peso utilizando las observaciones de TEST.
+    reference = result["reference_model"]
+    lstm_val = np.asarray(predictions["LSTM"], float)
+    ref_val = np.asarray(predictions[reference], float)
+    mask, scope, _ = score_mask(data, val_origins)
+    options = []
+    for weight in (0., .25, .5, .75, 1.):
+        candidate_val = weight*lstm_val + (1.-weight)*ref_val
+        score = metric_values(y[val_origins][mask], candidate_val[mask])
+        options.append((score["RMSE"], score["MAE"], weight, score))
+    _, _, weight, val_score = min(options, key=lambda item: (item[0], item[1], -item[2]))
+    result["mixture"] = {
+        "weight_lstm": float(weight),
+        "weight_reference": float(1.-weight),
+        "reference_model": reference,
+        "selection_split": "VALIDATION",
+        "validation_rmse": float(val_score["RMSE"]),
+        "validation_mae": float(val_score["MAE"]),
+        "scope": scope,
+    }
+    result["validation_detail"] = pd.DataFrame({
+        "Periodo": data.periodo.iloc[val_origins].to_numpy(),
+        "Real": y[val_origins], **predictions,
+        "Propuesta": weight*lstm_val + (1.-weight)*ref_val,
+    })
     result["diagnostic"] = diagnose(result, data)
     return finalize_test(result, progress) if evaluate_test else result
 
@@ -481,11 +512,18 @@ def finalize_test(result, progress=None):
     origins = np.arange(result["val_end"], len(y))
     predictions = base_predictions(y, origins, a["ridge"], a["lags"], config.periodicity)
     predictions["LSTM"] = predict_observed(a["models"], y, result["train_end"], result["selected"], origins)
+    alpha = result["mixture"]["weight_lstm"]
+    baseline = result["mixture"]["reference_model"]
+    predictions["Propuesta (selección VALIDACIÓN)"] = (
+        alpha*predictions["LSTM"] + (1.-alpha)*predictions[baseline]
+    )
     primary, all_rows, real_rows = table_metrics(data, origins, predictions, "TEST")
     result.update(metrics=primary, metrics_all=all_rows, metrics_real=real_rows)
     result["split_metrics"] = pd.concat([result["split_metrics"], primary], ignore_index=True)
     result["detail"] = pd.DataFrame({"Periodo": data.iloc[origins].periodo.to_numpy(), "Origen": data.iloc[origins].origen.to_numpy(),
                                       "Demanda_real": y[origins], "Prediccion_LSTM": predictions["LSTM"],
+                                      "Prediccion_propuesta": predictions["Propuesta (selección VALIDACIÓN)"],
+                                      "Prediccion_referencia": predictions[baseline],
                                       "Error": y[origins]-predictions["LSTM"], "Error_absoluto": np.abs(y[origins]-predictions["LSTM"])})
     result["detail"]["Interpretacion_objetivo"] = np.where(result["detail"].Origen.eq("REAL"), "Observado", "Reconstruido o no declarado")
     result["baseline_predictions"] = pd.DataFrame({"Periodo": data.iloc[origins].periodo.to_numpy(), **predictions})
@@ -602,6 +640,12 @@ def generate_future(result, progress=None):
     origins = np.arange(12, len(y))
     ridge = _ridge_fit(ridge_x(y, origins, a['lags']), y[origins, None], result['ridge_alpha'])
     reference = recursive_reference(y, [len(y)], config.horizon, result['reference_model'], ridge, a['lags'], config.periodicity)[0]
-    result["forecast"] = pd.DataFrame({"Periodo": labels, "Horizonte": np.arange(1, config.horizon+1), "LSTM": future,
-                                       'Referencia_validacion': reference})
+    alpha = result["mixture"]["weight_lstm"]
+    result["forecast"] = pd.DataFrame({
+        "Periodo": labels,
+        "Horizonte": np.arange(1, config.horizon+1),
+        "LSTM": future,
+        "Referencia_validacion": reference,
+        "Propuesta": alpha*future + (1.-alpha)*reference,
+    })
     return result

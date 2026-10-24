@@ -32,3 +32,14 @@ La planificación de producción de corte propio (inventario, reposición y capa
 Con `adaptive_search=True`, la selección temporal compara ventanas de 2 a 24 semanas, transformaciones local/nivel/cambio, pérdida MSE o Huber, ponderación reciente opcional y algunos modelos estacionales cuando existe historial. Los hiperparámetros se seleccionan únicamente en VALIDACIÓN. El TEST se evalúa después y no modifica la configuración. En pantalla se compara la LSTM con una referencia simple seleccionada por VALIDACIÓN; no se garantiza que la red neuronal la supere.
 
 Respaldo anterior: rama `respaldo-presentacion-antes-optimizacion`. La ejecución integral con TensorFlow debe verificarse en el equipo local.
+
+## Propuesta de planificación (selección por VALIDACIÓN)
+
+El programa calcula dos resultados separados para cada modalidad:
+
+1. **LSTM pura:** pronóstico neuronal y métricas TEST de la LSTM sin alterar.
+2. **Propuesta para planificar:** LSTM, método sencillo o combinación lineal; el método de referencia y los pesos 0/25/50/75/100 % se seleccionan en VALIDACIÓN sin consultar TEST. En TEST se informa su RMSE y R² separado del de la LSTM.
+
+La nueva preferencia de selección de candidatos LSTM pondera más los cortes de validación recientes, sin incluir valores de TEST. La prueba TEST existente ha sido consultada reiteradamente, por lo que sus resultados son exploratorios; se requiere evaluación con períodos futuros nuevos para reportar precisión independiente.
+
+**Importante:** la propuesta de planificación no equivale a producción física. El control de inventario, pedidos y capacidad se integrará en un módulo posterior.

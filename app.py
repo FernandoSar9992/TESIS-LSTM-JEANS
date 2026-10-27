@@ -204,7 +204,7 @@ with test_tab:
         tests=st.session_state.get("pruebas")
         if tests:
             test_rows=[]
-            for name,(table,m,b) in tests.items():
+            for name,(table,m,b,backtest,rm,rb) in tests.items():
                 test_rows.append({"Variable":name,"Modelo":"LSTM","Semanas":len(table),**m})
                 test_rows.append({"Variable":name,"Modelo":"Persistencia","Semanas":len(table),**b})
             totals=combined_test_metrics(tests)

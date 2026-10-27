@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import asdict
 import hmac
 import os
+import sys
+import importlib.util
 from datetime import date, datetime, timedelta
 from hashlib import sha256
 from io import BytesIO
@@ -146,8 +148,9 @@ with train_tab:
                 bar.progress(n/len(series))
             st.session_state["ajustes"]=fitted
             st.success("Entrenamiento y validación finalizados. Continúa en la pestaña Validación.")
-        except ImportError:
-            st.error("TensorFlow no está instalado en este entorno. Instala las dependencias de requirements.txt.")
+        except ImportError as exc:
+            st.error("No se pudo importar TensorFlow o una de sus dependencias.")
+            st.code(f"Python: {sys.version.split()[0]} | TensorFlow disponible: {importlib.util.find_spec('tensorflow') is not None}\n{type(exc).__name__}: {exc}")
         except Exception as exc:
             st.error(f"No se completó el entrenamiento: {type(exc).__name__}: {exc}")
 

@@ -234,7 +234,7 @@ with test_tab:
                 tests_for_totals["Producción de corte propio"]=(revised,*original[1:])
             totals=combined_test_metrics(tests_for_totals)
             for total_label,(table,m,b) in totals.items():
-                test_rows.append({"Variable":total_label,"Modelo":"Suma LSTM","Semanas":len(table),**m})
+                test_rows.append({"Variable":total_label,"Modelo":"Suma de modelos seleccionados","Semanas":len(table),**m})
                 test_rows.append({"Variable":total_label,"Modelo":"Suma persistencia","Semanas":len(table),**b})
             for name,(full,m,b,backtest,rm,rb) in tests.items():
                 test_rows.append({"Variable":name,"Modelo":"LSTM recursivo 12 semanas","Semanas":len(backtest),**rm})
@@ -269,7 +269,7 @@ with pred_tab:
         cp_selection=st.session_state.get("seleccion_cp")
         if cp_selection is not None:
             st.caption("Modelo de producción CP elegido en validación: "+cp_selection.method+". El resultado es producción esperada, no orden de fabricación.")
-        st.write("El modelo final se reajusta con el histórico cerrado, manteniendo la arquitectura fija y las épocas seleccionadas con validación. No vuelve a seleccionar hiperparámetros en prueba.")
+        st.write("Las LSTM conservadas se reajustan con el histórico cerrado y las épocas elegidas en validación. Para producción CP se utiliza el modelo seleccionado por validación; TEST no se usa para elegirlo.")
         if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
             try:
                 fcs={}
@@ -325,7 +325,24 @@ with pred_tab:
                     v=fit.validation.copy();v.insert(0,"Serie",name);valid_frames.append(v)
                     t=tests[name][0].copy();t.insert(0,"Serie",name);t.insert(1,"Tipo","Un paso");test_frames.append(t)
                     br=tests[name][3].copy();br.insert(0,"Serie",name);br.insert(1,"Tipo","Recursivo 12 semanas");test_frames.append(br)
-                for total_label,(table,m,b) in combined_test_metrics(tests).items():
+                cp_selection=st.session_state.get("seleccion_cp")
+                tests_for_export=tests.copy()
+                if cp_selection is not None and cp_selection.method!="LSTM original":
+                    cp_result=evaluate_cp_intermittent(fits["Producción de corte propio"],cp_selection)
+                    if cp_result is not None:
+                        cp_table,cp_metrics,cp_recursive=cp_result
+                        rows.append({"Serie":"Producción de corte propio","Etapa":"Prueba "+cp_selection.method,**cp_metrics,"Mejor época":None,
+                                     "Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":len(cp_table)})
+                        rows.append({"Serie":"Producción de corte propio","Etapa":"Prueba recursiva "+cp_selection.method,**cp_recursive,"Mejor época":None,
+                                     "Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":min(12,len(cp_table))})
+                        revised=tests["Producción de corte propio"][0].merge(cp_table[["fecha_inicio","Pronóstico_intermitente"]],on="fecha_inicio",how="left",validate="one_to_one")
+                        revised["LSTM"]=revised["Pronóstico_intermitente"]
+                        tests_for_export["Producción de corte propio"]=(revised,*tests["Producción de corte propio"][1:])
+                        cp_table_export=cp_table.copy()
+                        cp_table_export.insert(0,"Serie","Producción de corte propio")
+                        cp_table_export.insert(1,"Tipo","Prueba "+cp_selection.method)
+                        test_frames.append(cp_table_export)
+                for total_label,(table,m,b) in combined_test_metrics(tests_for_export).items():
                     for stage,values in [("Prueba total",m),("Referencia prueba total",b)]:
                         rows.append({"Serie":total_label,"Etapa":stage,**values,"Mejor época":None,
                                      "Semanas entrenamiento":None,"Semanas validación":None,

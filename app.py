@@ -249,13 +249,13 @@ with test_tab:
                 test_rows.append({"Variable":"Demanda de corte propio","Modelo":demand_choice.method+" (recursivo 12 sem)","Semanas":len(selection_table),**selection_metrics})
             totals=combined_test_metrics(tests_for_totals)
             for total_label,(table,m,b) in totals.items():
-                test_rows.append({"Variable":total_label,"Modelo":"Suma de modelos seleccionados","Semanas":len(table),**m})
+                test_rows.append({"Variable":total_label,"Modelo":"Suma un paso: LSTM demandas + método CP elegido","Semanas":len(table),**m})
                 test_rows.append({"Variable":total_label,"Modelo":"Suma persistencia","Semanas":len(table),**b})
             for name,(full,m,b,backtest,rm,rb) in tests.items():
                 test_rows.append({"Variable":name,"Modelo":"LSTM recursivo 12 semanas","Semanas":len(backtest),**rm})
                 test_rows.append({"Variable":name,"Modelo":"Persistencia fija 12 semanas","Semanas":len(backtest),**rb})
             st.dataframe(pd.DataFrame(test_rows),hide_index=True,use_container_width=True)
-            st.caption("PRUEBA un paso utiliza el histórico anterior a cada semana. PRUEBA recursiva proyecta 12 semanas sin consultar valores reales intermedios; es la comparación más semejante al pronóstico futuro.")
+            st.caption("La suma de prueba a un paso corresponde a LSTM de demandas y al método CP elegido, NO a la selección recursiva de demanda CP. Consulte la fila 'recursivo 12 sem' de demanda CP para evaluar el método efectivamente usado en el pronóstico futuro.")
             chosen=st.selectbox("Variable en PRUEBA",list(tests.keys()),key="test_choice")
             frame=tests[chosen][0]
             p=go.Figure()
@@ -287,7 +287,9 @@ with pred_tab:
         st.write("Pronóstico estable con la LSTM validada, sin reentrenarla desde cero. Demanda CP utiliza el método elegido por validación recursiva; producción CP conserva el método seleccionado en su validación.")
         demand_choice=st.session_state.get("seleccion_demanda_cp")
         if demand_choice is not None:
-            st.info("Demanda CP a 12 semanas — método seleccionado: "+demand_choice.method)
+            st.info("Demanda CP — método seleccionado con horizonte de 12 semanas: "+demand_choice.method)
+        if int(horizon)!=12:
+            st.warning("La selección del método de demanda CP se validó para 12 semanas; el horizonte actual es distinto. Utiliza 12 semanas para comparar rigurosamente con los resultados de validación.")
         if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
             try:
                 fcs={}
@@ -384,7 +386,7 @@ with pred_tab:
                     ("Versión metodológica","v2 pronóstico estable sin reajuste"),
                      ("Método demanda CP seleccionado",demand_choice.method if demand_choice else "LSTM validada"),
                      ("Método producción CP seleccionado",cp_selection.method if cp_selection else "LSTM original"),
-                     ("Tipo de datos","EXPERIMENTAL/SINTÉTICO si hoja distinta de DEMANDA" if sheet!="DEMANDA" else "Verificar trazabilidad de base"),
+                     ("Tipo de datos","EXPERIMENTAL/SINTÉTICO" if sheet!="DEMANDA" else "Base principal; verificar trazabilidad"),
                     ("Separación",f"{train_pct}% TRAIN, {val_pct}% VALIDACIÓN, {100-train_pct-val_pct}% TEST"),
                     ("Ventana",config.lookback),("Unidades LSTM",config.units),
                     ("Épocas máximas",config.epochs),("Semilla",config.seed),

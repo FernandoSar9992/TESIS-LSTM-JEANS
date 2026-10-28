@@ -357,7 +357,8 @@ def sum_aligned(a: pd.DataFrame, a_col: str, b: pd.DataFrame, b_col: str, new: s
 def make_forecast_table(forecasts: dict[str,pd.DataFrame]) -> pd.DataFrame:
     data=forecasts["Demanda de maquila"].copy()
     for name in ("Demanda de corte propio", "Producción de corte propio"):
-        data=data.merge(forecasts[name],on="fecha_inicio",validate="one_to_one")
+        if name in forecasts:
+            data=data.merge(forecasts[name],on="fecha_inicio",validate="one_to_one")
     data["demanda_total"]=data["demanda_mq"]+data["demanda_cp"]
     # Total conforme a la regla operativa del libro cargado:
     # demanda maquila asumida como producción MQ + producción registrada/pronosticada CP.

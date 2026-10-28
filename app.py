@@ -21,6 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from pronostico_horizonte import select_demand_by_validation, evaluate_demand_test, forecast_lstm_verified, forecast_demand_selected
 from produccion_intermitente import select_by_validation, evaluate_test as evaluate_cp_intermittent, forecast_future as forecast_cp_intermittent
 from motor_lstm import (APP_TIMEZONE, TARGETS, Settings, extract_series, final_test, combined_test_metrics,
                         fit_one, full_refit_forecast, make_forecast_table, recursive_test,
@@ -86,7 +87,7 @@ if st.session_state.get("forecast_signature") != forecast_signature:
     st.session_state.pop("pronosticos",None)
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
-    for key in ("ajustes","pruebas","pronosticos","seleccion_cp"):
+    for key in ("ajustes","pruebas","pronosticos","seleccion_cp","seleccion_demanda_cp"):
         st.session_state.pop(key,None)
 
 c1,c2,c3,c4=st.columns(4)
@@ -113,6 +114,8 @@ with st.expander("Ver datos históricos y ficha técnica",expanded=False):
     if info["diferencias_en_total_archivo"]:
         st.warning(f"El total de producción del archivo difiere de maquila + corte propio en {info['diferencias_en_total_archivo']} filas. Los pronósticos de totales se calcularán por suma explícita.")
 
+if sheet!="DEMANDA":
+    st.warning("EXPERIMENTO CON DATOS SINTÉTICOS: los resultados de esta hoja NO son evidencia predictiva sobre la producción real del taller.")
 series={}
 try:
     for name,target in TARGETS.items():
@@ -140,6 +143,7 @@ with train_tab:
         st.session_state.pop("pronosticos",None)
         fitted={}
         st.session_state.pop("seleccion_cp",None)
+        st.session_state.pop("seleccion_demanda_cp",None)
         bar=st.progress(0)
         try:
             import tensorflow as tf
@@ -150,6 +154,7 @@ with train_tab:
                 bar.progress(n/len(series))
             st.session_state["ajustes"]=fitted
             st.session_state["seleccion_cp"]=select_by_validation(fitted["Producción de corte propio"])
+            st.session_state["seleccion_demanda_cp"]=select_demand_by_validation(fitted["Demanda de corte propio"],12)
             st.success("Entrenamiento y validación finalizados. Continúa en la pestaña Validación.")
         except ImportError as exc:
             st.error("No se pudo importar TensorFlow o una de sus dependencias.")
@@ -169,6 +174,12 @@ with valid_tab:
             st.dataframe(cp_selection.comparison,hide_index=True,use_container_width=True)
             st.info(f"Modelo de producción elegido únicamente por MAE de validación: {cp_selection.method}. TEST no participa en la selección.")
 
+        demand_choice=st.session_state.get("seleccion_demanda_cp")
+        if demand_choice is not None:
+            st.markdown("#### Validación recursiva de 12 semanas: demanda de corte propio")
+            st.caption("Se comparan métodos en orígenes dentro de VALIDACIÓN. TEST no participa en la selección.")
+            st.dataframe(demand_choice.comparison,hide_index=True,use_container_width=True)
+            st.info("Método seleccionado para demanda CP a 12 semanas: "+demand_choice.method)
         summary=[]
         for name,fit in fits.items():
             for stage,values in [("Entrenamiento",fit.train_metrics),("Validación",fit.validation_metrics),("Referencia validación",fit.baseline_validation_metrics)]:
@@ -232,6 +243,10 @@ with test_tab:
                     raise ValueError("Las semanas de prueba de producción no coinciden.")
                 revised["LSTM"]=revised["Pronóstico_intermitente"]
                 tests_for_totals["Producción de corte propio"]=(revised,*original[1:])
+            demand_choice=st.session_state.get("seleccion_demanda_cp")
+            if demand_choice is not None:
+                selection_table,selection_metrics=evaluate_demand_test(fits["Demanda de corte propio"],demand_choice,12)
+                test_rows.append({"Variable":"Demanda de corte propio","Modelo":demand_choice.method+" (recursivo 12 sem)","Semanas":len(selection_table),**selection_metrics})
             totals=combined_test_metrics(tests_for_totals)
             for total_label,(table,m,b) in totals.items():
                 test_rows.append({"Variable":total_label,"Modelo":"Suma de modelos seleccionados","Semanas":len(table),**m})
@@ -269,16 +284,23 @@ with pred_tab:
         cp_selection=st.session_state.get("seleccion_cp")
         if cp_selection is not None:
             st.caption("Modelo de producción CP elegido en validación: "+cp_selection.method+". El resultado es producción esperada, no orden de fabricación.")
-        st.write("Las LSTM conservadas se reajustan con el histórico cerrado y las épocas elegidas en validación. Para producción CP se utiliza el modelo seleccionado por validación; TEST no se usa para elegirlo.")
+        st.write("Pronóstico estable con la LSTM validada, sin reentrenarla desde cero. Demanda CP utiliza el método elegido por validación recursiva; producción CP conserva el método seleccionado en su validación.")
+        demand_choice=st.session_state.get("seleccion_demanda_cp")
+        if demand_choice is not None:
+            st.info("Demanda CP a 12 semanas — método seleccionado: "+demand_choice.method)
         if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
             try:
                 fcs={}
                 cp_selection=st.session_state.get("seleccion_cp")
+                demand_choice=st.session_state.get("seleccion_demanda_cp")
                 for name,fit in fits.items():
                     with st.spinner(f"Generando futuro: {name}…"):
                         if name=="Producción de corte propio" and cp_selection is not None and cp_selection.method!="LSTM original":
                             continue
-                        fcs[name]=full_refit_forecast(fit,start_plan,int(horizon))
+                        if name=="Demanda de corte propio" and demand_choice is not None:
+                            fcs[name]=forecast_demand_selected(fit,demand_choice,start_plan,int(horizon))
+                        else:
+                            fcs[name]=forecast_lstm_verified(fit,start_plan,int(horizon))
                 if cp_selection is not None and cp_selection.method!="LSTM original":
                     fcs["Producción de corte propio"]=forecast_cp_intermittent(
                         fits["Producción de corte propio"],cp_selection,
@@ -342,6 +364,14 @@ with pred_tab:
                         cp_table_export.insert(0,"Serie","Producción de corte propio")
                         cp_table_export.insert(1,"Tipo","Prueba "+cp_selection.method)
                         test_frames.append(cp_table_export)
+                demand_choice=st.session_state.get("seleccion_demanda_cp")
+                if demand_choice is not None:
+                    selected_t,selected_m=evaluate_demand_test(fits["Demanda de corte propio"],demand_choice,12)
+                    rows.append({"Serie":"Demanda de corte propio","Etapa":"Prueba recursiva seleccionada: "+demand_choice.method,**selected_m,"Mejor época":None,"Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":len(selected_t)})
+                    selected_export=selected_t.copy()
+                    selected_export.insert(0,"Serie","Demanda de corte propio")
+                    selected_export.insert(1,"Tipo","Recursivo seleccionado "+demand_choice.method)
+                    test_frames.append(selected_export)
                 for total_label,(table,m,b) in combined_test_metrics(tests_for_export).items():
                     for stage,values in [("Prueba total",m),("Referencia prueba total",b)]:
                         rows.append({"Serie":total_label,"Etapa":stage,**values,"Mejor época":None,
@@ -351,7 +381,10 @@ with pred_tab:
                     ("Archivo",upload.name),("SHA256",sha256(content).hexdigest()),
                     ("Fecha última semana cerrada",str(info["fecha_ultima_semana"])),
                     ("Inicio pronóstico",str(start_plan)),("Horizonte semanal",int(horizon)),
-                    ("Versión metodológica","LSTM-univariable-tres-series-v1"),
+                    ("Versión metodológica","v2 pronóstico estable sin reajuste"),
+                     ("Método demanda CP seleccionado",demand_choice.method if demand_choice else "LSTM validada"),
+                     ("Método producción CP seleccionado",cp_selection.method if cp_selection else "LSTM original"),
+                     ("Tipo de datos","EXPERIMENTAL/SINTÉTICO si hoja distinta de DEMANDA" if sheet!="DEMANDA" else "Verificar trazabilidad de base"),
                     ("Separación",f"{train_pct}% TRAIN, {val_pct}% VALIDACIÓN, {100-train_pct-val_pct}% TEST"),
                     ("Ventana",config.lookback),("Unidades LSTM",config.units),
                     ("Épocas máximas",config.epochs),("Semilla",config.seed),

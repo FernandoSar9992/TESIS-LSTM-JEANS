@@ -1,425 +1,283 @@
-"""Aplicación final de pronóstico de demanda y producción para tesis de jeans.
-
-Inicia: streamlit run app.py
-Requiere: Python 3.11, requirements.txt, hoja DEMANDA.
-La procedencia se conserva en los datos de entrada y en la ficha técnica.
+"""Aplicación de tesis: pronóstico semanal de demanda para planificación productiva.
+La producción propia es análisis opcional. Datos originales inalterados.
 """
 from __future__ import annotations
-
 from dataclasses import asdict
+from datetime import date
+from hashlib import sha256
+from io import BytesIO
 import hmac
 import os
 import sys
 import importlib.util
-from datetime import date, datetime, timedelta
-from hashlib import sha256
-from io import BytesIO
-import json
-
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,extract_series,fit_one,
+                         final_test,recursive_test,make_forecast_table)
+from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
+                                  forecast_lstm_verified,forecast_demand_selected)
+from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
+                                     forecast_future as forecast_intermitente)
 
-from pronostico_horizonte import select_demand_by_validation, evaluate_demand_test, forecast_lstm_verified, forecast_demand_selected
-from produccion_intermitente import select_by_validation, evaluate_test as evaluate_cp_intermittent, forecast_future as forecast_cp_intermittent
-from motor_lstm import (APP_TIMEZONE, TARGETS, Settings, extract_series, final_test, combined_test_metrics,
-                        fit_one, full_refit_forecast, make_forecast_table, recursive_test,
-                        prepare_base, metrics)
-
-st.set_page_config(page_title="LSTM | Planificación de jeans",page_icon="📈",layout="wide")
-st.markdown("""
-<style>
-.block-container{padding-top:1.2rem;max-width:1440px}
-h1,h2,h3{font-family:Arial,sans-serif}
-[data-testid="stMetric"]{border:1px solid #e6e6e0;border-radius:6px;padding:9px 13px;background:#fff}
-[data-testid="stSidebar"]{background:#f8f8f5}
-hr{border-color:#e8e8e6}
-</style>
-""",unsafe_allow_html=True)
-
-required_password=os.environ.get("TESIS_ACCESS_PASSWORD", "").strip()
-if required_password:
-    access=st.text_input("Clave de acceso al modelo",type="password")
-    if not hmac.compare_digest(str(access),required_password):
-        st.info("Introduce la clave facilitada por el autor para acceder a la aplicación.")
-        st.stop()
-
-st.title("Pronóstico de demanda y producción de jeans")
-st.caption("Pronóstico semanal · Validación cronológica · Demanda de maquila y corte propio · Producción como análisis complementario")
+st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
+st.title("Pronóstico semanal de demanda de jeans")
+st.caption("Maquila y corte propio · LSTM · Validación cronológica · Entradas para planificación agregada y PMP")
+password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
+if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
+    st.info("Introduce la clave de acceso."); st.stop()
 
 with st.sidebar:
     st.header("Configuración")
-    st.caption("Parámetros fijados antes de examinar el conjunto de prueba")
-    window=st.number_input("Ventana histórica (semanas)",min_value=4,max_value=24,value=12,step=1)
-    epochs=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
+    weeks=st.number_input("Semanas del pronóstico",min_value=1,max_value=26,value=12,step=1)
+    start=st.date_input("Inicio del plan (lunes)",value=date(2026,11,2))
+    st.caption("Ajustes de entrenamiento")
+    look=st.number_input("Ventana histórica",min_value=4,max_value=24,value=12)
+    ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
-    train_pct=st.slider("Entrenamiento (%)",min_value=60,max_value=80,value=70,step=5)
-    val_pct=st.slider("Validación (%)",min_value=10,max_value=20,value=15,step=5)
-    seed=st.number_input("Semilla aleatoria",min_value=0,max_value=999999,value=42,step=1)
-    default_date=date(2026,11,2)
-    start_plan=st.date_input("Inicio del horizonte futuro (lunes)",value=default_date)
-    horizon=st.number_input("Semanas a pronosticar",min_value=1,max_value=26,value=12,step=1)
-    st.caption("La prueba se reserva hasta finalizar la validación. No se utiliza para ajustar hiperparámetros.")
+    seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
+    optional=st.checkbox("Incluir análisis complementario de producción CP",value=False,
+                         help="La producción depende de decisiones de reposición de inventario; no es una restricción de capacidad.")
+    with st.expander("Detalles de evaluación",expanded=False):
+        train=st.slider("Entrenamiento (%)",60,80,70,5)
+        val=st.slider("Validación (%)",10,20,15,5)
+    st.caption("No se usan las semanas de prueba para seleccionar métodos.")
 
-config=Settings(lookback=int(window),epochs=int(epochs),units=int(units),
-                train_ratio=float(train_pct)/100,val_ratio=float(val_pct)/100,seed=int(seed))
-
-upload=st.file_uploader("1. Cargar base de datos Excel",type=["xlsx","xlsm"],help="Utiliza la hoja DEMANDA y el encabezado de la primera fila.")
-if upload is None:
-    st.info("Adjunta 04_BASE_DE_DATOS.xlsx para iniciar. El archivo se procesa durante esta sesión y no es necesario modificar sus datos originales.")
-    st.stop()
-
-content=upload.getvalue()
+settings=Settings(lookback=int(look),epochs=int(ep),units=int(units),seed=int(seed),
+                  train_ratio=train/100,val_ratio=val/100)
+file=st.file_uploader("Cargar 04_BASE_DE_DATOS.xlsx",type=["xlsx","xlsm"])
+if file is None:
+    st.info("Carga el archivo con la hoja DEMANDA para iniciar."); st.stop()
+payload=file.getvalue()
 try:
-    book=pd.ExcelFile(BytesIO(content))
-    if "DEMANDA" not in book.sheet_names:
-        raise ValueError("El archivo debe incluir la hoja oficial DEMANDA.")
-    sheet="DEMANDA"
-    st.caption("Hoja utilizada: DEMANDA. La aplicación conserva las fechas y los registros cargados sin alterarlos.")
-    raw=pd.read_excel(BytesIO(content),sheet_name=sheet,header=0)
-    data,info=prepare_base(raw)
-except Exception as exc:
-    st.error(f"No fue posible leer la base: {exc}")
-    st.stop()
+    xl=pd.ExcelFile(BytesIO(payload))
+    if "DEMANDA" not in xl.sheet_names:
+        raise ValueError("No existe la hoja DEMANDA en el archivo.")
+    base,info=prepare_base(pd.read_excel(BytesIO(payload),sheet_name="DEMANDA"))
+    names={"Demanda de maquila":"demanda_mq","Demanda de corte propio":"demanda_cp"}
+    if optional: names["Producción de corte propio"]="produccion_cp"
+    series={name:extract_series(base,col) for name,col in names.items()}
+except Exception as e:
+    st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-signature=sha256(content+sheet.encode()+repr(asdict(config)).encode()).hexdigest()
-forecast_signature=f"{start_plan}-{horizon}"
-if st.session_state.get("forecast_signature") != forecast_signature:
-    st.session_state["forecast_signature"]=forecast_signature
-    st.session_state.pop("pronosticos",None)
+signature=sha256(payload+repr(asdict(settings)).encode()+str(optional).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
-    for key in ("ajustes","pruebas","pronosticos","seleccion_cp","seleccion_demanda_cp"):
-        st.session_state.pop(key,None)
+    for k in ("fits","tests","forecast","cp_choice","demand_choice"):
+        st.session_state.pop(k,None)
+forecast_key=(str(start),int(weeks))
+if st.session_state.get("forecast_key")!=forecast_key:
+    st.session_state["forecast_key"]=forecast_key
+    st.session_state.pop("forecast",None)
 
-c1,c2,c3,c4=st.columns(4)
-c1.metric("Semanas cerradas",info["semanas_completas"])
-c2.metric("Última semana cerrada",info["fecha_ultima_semana"].strftime("%d/%m/%Y"))
-c3.metric("Semanas en curso o futuras",info["semanas_no_cerradas"])
-c4.metric("Series a entrenar",len(TARGETS))
+c1,c2,c3=st.columns(3)
+c1.metric("Semanas completas",info["semanas_completas"])
+c2.metric("Último viernes registrado",str(info["fecha_ultima_semana"]))
+c3.metric("Series analizadas",len(series))
 if info["semanas_no_cerradas"]:
-    st.caption("Las semanas cuyo viernes aún no ha transcurrido no se utilizan para entrenar ni evaluar.")
-
-with st.expander("Ver datos históricos y ficha técnica",expanded=False):
-    shown=data[["fecha_inicio","demanda_mq","demanda_cp","produccion_cp"]].rename(columns={
-        "fecha_inicio":"Inicio", "demanda_mq":"Demanda maquila", "demanda_cp":"Demanda corte propio",
-        "produccion_cp":"Producción corte propio"})
-    st.dataframe(shown,hide_index=True,use_container_width=True,height=300)
-    metadata={
-        "Archivo cargado":upload.name,"Hoja":sheet,
-        "Período disponible":f"{info['fecha_primera_semana']} a {info['fecha_ultima_semana']}",
-        "SHA-256":sha256(content).hexdigest(),
-        "Fuente declarada en la base": ", ".join(info["fuentes_declaradas"]) if info["fuentes_declaradas"] else "No especificada",
-    }
-    st.table(pd.DataFrame(list(metadata.items()),columns=["Dato","Valor"]))
-    st.caption("Esta ficha reproduce la información declarada en el archivo; no certifica documentos externos. Los valores faltantes anteriores al inicio de corte propio no se convierten en demanda cero.")
+    st.caption("Se excluyen las semanas todavía no cerradas.")
+with st.expander("Datos y trazabilidad"):
+    st.dataframe(base[["fecha_inicio","demanda_mq","demanda_cp","produccion_cp"]],hide_index=True,use_container_width=True,height=230)
+    st.caption("Archivo: "+file.name+" | SHA-256: "+sha256(payload).hexdigest())
+    st.caption("Origen declarado: "+(", ".join(info["fuentes_declaradas"]) if info["fuentes_declaradas"] else "No declarado. Verificar documentación de origen."))
+    st.caption("Los registros se leen sin modificar. Los ceros reales de producción permanecen.")
     if info["diferencias_en_total_archivo"]:
-        st.warning(f"El total de producción del archivo difiere de maquila + corte propio en {info['diferencias_en_total_archivo']} filas. Los pronósticos de totales se calcularán por suma explícita.")
+        st.warning("El campo de producción total del archivo difiere de la suma MQ+CP en "+str(info["diferencias_en_total_archivo"])+" semanas.")
 
-series={}
-try:
-    for name,target in TARGETS.items():
-        series[name]=extract_series(data,target)
-except Exception as exc:
-    st.error(f"No fue posible preparar las tres series: {exc}")
-    st.stop()
-
-with st.expander("Gráfica del historial",expanded=False):
-    selected=st.selectbox("Variable histórica",list(TARGETS.keys()),key="history_choice")
-    t=series[selected]
-    plot=go.Figure()
-    plot.add_trace(go.Scatter(x=t.fecha_inicio,y=t.valor,mode="lines+markers",name=selected,line_color="#916900",marker_size=3))
-    plot.update_layout(height=310,margin=dict(l=10,r=10,t=15,b=10),xaxis_title="Semana",yaxis_title="Pantalones",template="plotly_white")
-    st.plotly_chart(plot,use_container_width=True)
-
-train_tab,valid_tab,test_tab,pred_tab=st.tabs(["2. Entrenamiento","3. Validación","4. Prueba","5. Pronóstico final"])
-
-with train_tab:
-    st.markdown("#### Entrenar modelos de las tres series")
-    st.write("Se entrenan **tres LSTM** sobre series cronológicas independientes. Las referencias y alternativas se comparan en validación. La normalización usa únicamente entrenamiento.")
-    if st.button("Entrenar modelos LSTM",type="primary",use_container_width=True):
-        st.session_state.pop("ajustes",None)
-        st.session_state.pop("pruebas",None)
-        st.session_state.pop("pronosticos",None)
+t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
+with t1:
+    st.subheader("Entrenar LSTM de demanda")
+    st.write("La producción CP es opcional. Las dos series de demanda se entrenan por separado, con escalado ajustado solo en entrenamiento.")
+    if st.button("Entrenar modelos",type="primary",use_container_width=True):
+        for k in ("fits","tests","forecast","cp_choice","demand_choice"):
+            st.session_state.pop(k,None)
         fitted={}
-        st.session_state.pop("seleccion_cp",None)
-        st.session_state.pop("seleccion_demanda_cp",None)
-        bar=st.progress(0)
+        progress=st.progress(0)
         try:
             import tensorflow as tf
             tf.get_logger().setLevel("ERROR")
-            for n,(name,frame) in enumerate(series.items(),start=1):
-                with st.spinner(f"Entrenando {name}…"):
-                    fitted[name]=fit_one(name,frame,config)
-                bar.progress(n/len(series))
-            st.session_state["ajustes"]=fitted
-            st.session_state["seleccion_cp"]=select_by_validation(fitted["Producción de corte propio"])
-            st.session_state["seleccion_demanda_cp"]=select_demand_by_validation(fitted["Demanda de corte propio"],12)
-            st.success("Entrenamiento y validación finalizados. Continúa en la pestaña Validación.")
-        except ImportError as exc:
-            st.error("No se pudo importar TensorFlow o una de sus dependencias.")
-            st.code(f"Python: {sys.version.split()[0]} | TensorFlow disponible: {importlib.util.find_spec('tensorflow') is not None}\n{type(exc).__name__}: {exc}")
-        except Exception as exc:
-            st.error(f"No se completó el entrenamiento: {type(exc).__name__}: {exc}")
+            for i,(name,frame) in enumerate(series.items()):
+                with st.spinner("Entrenando "+name):
+                    fitted[name]=fit_one(name,frame,settings)
+                progress.progress((i+1)/len(series))
+            st.session_state["fits"]=fitted
+            st.session_state["demand_choice"]=select_demand_by_validation(fitted["Demanda de corte propio"],min(int(weeks),12))
+            if optional:
+                st.session_state["cp_choice"]=select_by_validation(fitted["Producción de corte propio"])
+            st.success("Entrenamiento y validación completados.")
+        except ImportError as e:
+            st.error("No se pudo importar TensorFlow: "+str(e))
+            st.caption("Python: "+sys.version.split()[0])
+        except Exception as e:
+            st.error("No se completó el entrenamiento: "+type(e).__name__+": "+str(e))
 
-fits=st.session_state.get("ajustes")
-with valid_tab:
+fits=st.session_state.get("fits")
+with t2:
     if not fits:
-        st.info("Primero ejecuta el entrenamiento en la pestaña anterior.")
+        st.info("Primero entrena en la pestaña 1.")
     else:
-        st.markdown("#### Resultados de validación")
-        cp_selection=st.session_state.get("seleccion_cp")
-        if cp_selection is not None:
-            st.markdown("#### Comparación: producción intermitente de corte propio")
-            st.dataframe(cp_selection.comparison,hide_index=True,use_container_width=True)
-            st.info(f"Modelo de producción elegido únicamente por MAE de validación: {cp_selection.method}. TEST no participa en la selección.")
-
-        demand_choice=st.session_state.get("seleccion_demanda_cp")
-        if demand_choice is not None:
-            st.markdown("#### Validación recursiva de 12 semanas: demanda de corte propio")
-            st.caption("Se comparan métodos en orígenes dentro de VALIDACIÓN. TEST no participa en la selección.")
-            st.dataframe(demand_choice.comparison,hide_index=True,use_container_width=True)
-            st.info("Método seleccionado para demanda CP a 12 semanas: "+demand_choice.method)
-        summary=[]
+        st.subheader("Validación de demanda")
+        rows=[]
         for name,fit in fits.items():
-            for stage,values in [("Entrenamiento",fit.train_metrics),("Validación",fit.validation_metrics),("Referencia validación",fit.baseline_validation_metrics)]:
-                summary.append({"Variable":name,"Etapa":stage,"Semanas":len(fit.training) if stage=="Entrenamiento" else len(fit.validation),**values})
-        report=pd.DataFrame(summary)
-        st.dataframe(report,hide_index=True,use_container_width=True,column_config={k:st.column_config.NumberColumn(format="%.3f") for k in ["MAE","RMSE","R²","Sesgo","WAPE (%)","MASE"]})
-        choice=st.selectbox("Variable para inspección",list(fits.keys()),key="valid_choice")
-        res=fits[choice]
+            rows.append({"Serie":name,"Modelo":"LSTM","Etapa":"Validación",**fit.validation_metrics})
+            rows.append({"Serie":name,"Modelo":"Persistencia","Etapa":"Validación",**fit.baseline_validation_metrics})
+        st.dataframe(pd.DataFrame(rows).round(3),hide_index=True,use_container_width=True)
+        selected=st.session_state.get("demand_choice")
+        if selected is not None:
+            row=selected.comparison.iloc[0]
+            st.caption("Demanda CP a "+str(selected.horizon)+" semanas: mejor método por MAE de validación = "+selected.method+
+                       "; MAE = "+format(row["MAE"],".2f")+".")
+        series_choice=st.selectbox("Gráfico de validación",list(fits.keys()),key="valid_series")
+        f=fits[series_choice]
         fig=go.Figure()
-        fig.add_trace(go.Scatter(x=res.validation.fecha_inicio,y=res.validation.real,name="Real",mode="lines+markers",line_color="#1B365D"))
-        fig.add_trace(go.Scatter(x=res.validation.fecha_inicio,y=res.validation.LSTM,name="LSTM",mode="lines+markers",line_color="#C39B00"))
-        fig.add_trace(go.Scatter(x=res.validation.fecha_inicio,y=res.validation.Referencia_ultimo_valor,name="Referencia: última semana",line=dict(color="#999999",dash="dash")))
-        fig.update_layout(title=f"Validación: {choice}",template="plotly_white",height=350,margin=dict(l=10,r=10,t=50,b=10),yaxis_title="Pantalones")
+        for label,field,color in [("Real","real","#1B365D"),("LSTM","LSTM","#C39B00"),("Persistencia","Referencia_ultimo_valor","#8A8A8A")]:
+            fig.add_trace(go.Scatter(x=f.validation.fecha_inicio,y=f.validation[field],name=label,mode="lines+markers",line_color=color))
+        fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
         st.plotly_chart(fig,use_container_width=True)
-        m=res.validation_metrics["MAE"]
-        ref=res.baseline_validation_metrics["MAE"]
-        st.caption(f"MAE validación LSTM: {m:.2f} · MAE persistencia: {ref:.2f} · Mejor época de validación: {res.best_epoch}")
-        if m >= ref:
-            st.info("En esta variable, la LSTM no supera en MAE al pronóstico de persistencia durante validación. Es un resultado importante que debe reportarse.")
-        with st.expander("Curva de aprendizaje"):
-            losses=res.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
-            st.line_chart(losses)
+        with st.expander("Comparaciones técnicas y curva de aprendizaje"):
+            if selected is not None:
+                st.markdown("**Métodos de demanda CP: pronóstico recursivo**")
+                st.dataframe(selected.comparison.round(3),hide_index=True,use_container_width=True)
+                st.caption("Las ventanas de validación se solapan y no equivalen a observaciones independientes.")
+            if optional and st.session_state.get("cp_choice") is not None:
+                st.markdown("**Producción CP: métodos de producción intermitente**")
+                st.dataframe(st.session_state["cp_choice"].comparison.round(3),hide_index=True,use_container_width=True)
+            loss=f.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
+            st.line_chart(loss)
 
-with test_tab:
+with t3:
     if not fits:
-        st.info("Entrena los modelos antes de evaluar la prueba final.")
+        st.info("Primero entrena los modelos.")
     else:
-        st.write("La prueba se evalúa con datos reservados, **sin reentrenar ni modificar los hiperparámetros según sus resultados**.")
-        if not st.session_state.get("pruebas"):
-            if st.button("Evaluar PRUEBA final",type="primary",use_container_width=True):
-                results={}
+        st.subheader("Prueba final con semanas reservadas")
+        if st.session_state.get("tests") is None:
+            if st.button("Evaluar PRUEBA",type="primary",use_container_width=True):
                 try:
+                    result={}
                     for name,fit in fits.items():
-                        with st.spinner(f"Evaluando {name}…"):
-                            one=final_test(fit)
-                            twelve=recursive_test(fit,12)
-                            results[name]=(*one,*twelve)
-                    st.session_state["pruebas"]=results
-                    st.success("Prueba final evaluada. Los resultados quedan fijados para esta carga y configuración.")
-                except Exception as exc:
-                    st.error(f"Error en prueba: {exc}")
-        tests=st.session_state.get("pruebas")
+                        result[name]=(*final_test(fit),*recursive_test(fit,12))
+                    st.session_state["tests"]=result
+                    st.success("Prueba evaluada. No se usó para elegir modelos.")
+                except Exception as e:
+                    st.error("Error en prueba: "+str(e))
+        tests=st.session_state.get("tests")
         if tests:
-            test_rows=[]
-            for name,(table,m,b,backtest,rm,rb) in tests.items():
-                test_rows.append({"Variable":name,"Modelo":"LSTM","Semanas":len(table),**m})
-                test_rows.append({"Variable":name,"Modelo":"Persistencia","Semanas":len(table),**b})
-            cp_selection=st.session_state.get("seleccion_cp")
-            if cp_selection is not None and cp_selection.method!="LSTM original":
-                cp_comparison=evaluate_cp_intermittent(fits["Producción de corte propio"],cp_selection)
-                if cp_comparison is not None:
-                    cp_table,cp_metrics,cp_recursive=cp_comparison
-                    test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method,"Semanas":len(cp_table),**cp_metrics})
-                    test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method+" recursivo 12 semanas","Semanas":min(12,len(cp_table)),**cp_recursive})
-            tests_for_totals=tests.copy()
-            if cp_selection is not None and cp_selection.method!="LSTM original" and cp_comparison is not None:
-                cp_table,cp_metrics,cp_recursive=cp_comparison
-                original=tests["Producción de corte propio"]
-                revised=original[0].merge(cp_table[["fecha_inicio","Pronóstico_intermitente"]],on="fecha_inicio",how="left",validate="one_to_one")
-                if revised["Pronóstico_intermitente"].isna().any():
-                    raise ValueError("Las semanas de prueba de producción no coinciden.")
-                revised["LSTM"]=revised["Pronóstico_intermitente"]
-                tests_for_totals["Producción de corte propio"]=(revised,*original[1:])
-            demand_choice=st.session_state.get("seleccion_demanda_cp")
-            if demand_choice is not None:
-                selection_table,selection_metrics=evaluate_demand_test(fits["Demanda de corte propio"],demand_choice,12)
-                test_rows.append({"Variable":"Demanda de corte propio","Modelo":demand_choice.method+" (recursivo 12 sem)","Semanas":len(selection_table),**selection_metrics})
-            totals=combined_test_metrics(tests_for_totals)
-            for total_label,(table,m,b) in totals.items():
-                test_rows.append({"Variable":total_label,"Modelo":"Suma un paso: LSTM demandas + método CP elegido","Semanas":len(table),**m})
-                test_rows.append({"Variable":total_label,"Modelo":"Suma persistencia","Semanas":len(table),**b})
-            for name,(full,m,b,backtest,rm,rb) in tests.items():
-                test_rows.append({"Variable":name,"Modelo":"LSTM recursivo 12 semanas","Semanas":len(backtest),**rm})
-                test_rows.append({"Variable":name,"Modelo":"Persistencia fija 12 semanas","Semanas":len(backtest),**rb})
-            st.dataframe(pd.DataFrame(test_rows),hide_index=True,use_container_width=True)
-            st.caption("La suma de prueba a un paso corresponde a LSTM de demandas y al método CP elegido, NO a la selección recursiva de demanda CP. Consulte la fila 'recursivo 12 sem' de demanda CP para evaluar el método efectivamente usado en el pronóstico futuro.")
-            chosen=st.selectbox("Variable en PRUEBA",list(tests.keys()),key="test_choice")
-            frame=tests[chosen][0]
-            p=go.Figure()
-            p.add_trace(go.Scatter(x=frame.fecha_inicio,y=frame.real,name="Real",line_color="#1B365D"))
-            p.add_trace(go.Scatter(x=frame.fecha_inicio,y=frame.LSTM,name="LSTM",line_color="#C39B00"))
-            p.add_trace(go.Scatter(x=frame.fecha_inicio,y=frame.Referencia_ultimo_valor,name="Persistencia",line=dict(color="#999999",dash="dash")))
-            p.update_layout(height=350,template="plotly_white",margin=dict(l=10,r=10,t=20,b=10),yaxis_title="Pantalones")
-            st.plotly_chart(p,use_container_width=True)
-            with st.expander("Prueba recursiva de 12 semanas (sin datos reales intermedios)"):
-                rolling=tests[chosen][3]
-                gp=go.Figure()
-                gp.add_trace(go.Scatter(x=rolling.fecha_inicio,y=rolling.real,name="Real",line_color="#1B365D"))
-                gp.add_trace(go.Scatter(x=rolling.fecha_inicio,y=rolling.LSTM,name="LSTM recursiva",line_color="#C39B00"))
-                gp.update_layout(height=310,template="plotly_white",margin=dict(l=10,r=10,t=20,b=10),yaxis_title="Pantalones")
-                st.plotly_chart(gp,use_container_width=True)
-                st.caption(f"MAE LSTM recursivo: {tests[chosen][4]['MAE']:.2f} · MAE referencia: {tests[chosen][5]['MAE']:.2f}")
-            st.caption("Las métricas de prueba describen únicamente la capacidad predictiva sobre los datos reservados; no garantizan resultados futuros.")
+            r=[]
+            for name,values in tests.items():
+                f=fits[name]; one, m,b,rolling,rm,rb=values
+                r.extend([{"Serie":name,"Método":"LSTM, un paso","Semanas":len(one),**m},
+                          {"Serie":name,"Método":"Persistencia, un paso","Semanas":len(one),**b},
+                          {"Serie":name,"Método":"LSTM, recursivo 12","Semanas":len(rolling),**rm},
+                          {"Serie":name,"Método":"Persistencia fija, recursivo 12","Semanas":len(rolling),**rb}])
+            selected=st.session_state.get("demand_choice")
+            if selected:
+                chosen_table,chosen_metrics=evaluate_demand_test(fits["Demanda de corte propio"],selected,12)
+                r.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
+            st.dataframe(pd.DataFrame(r).round(3),hide_index=True,use_container_width=True)
+            choice=st.selectbox("Gráfico de prueba",list(tests.keys()),key="test_series")
+            test_df=tests[choice][3]
+            fig=go.Figure()
+            fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.real,name="Real",mode="lines+markers"))
+            fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.LSTM,name="LSTM recursiva",mode="lines+markers"))
+            fig.update_layout(template="plotly_white",height=310,yaxis_title="Pantalones/semana")
+            st.plotly_chart(fig,use_container_width=True)
+            st.caption("El R² puede ser negativo cuando no se anticipan bien las variaciones. Las métricas de TEST se conservan sin ajustes posteriores.")
 
-with pred_tab:
-    fits=st.session_state.get("ajustes")
-    tests=st.session_state.get("pruebas")
+with t4:
+    tests=st.session_state.get("tests")
     if not fits or not tests:
-        st.info("Para generar el pronóstico final, primero entrena los modelos y evalúa PRUEBA.")
+        st.info("Para pronosticar, completa entrenamiento y prueba.")
     else:
-        st.markdown("#### Pronóstico semanal para planificación agregada y PMP")
-        cp_selection=st.session_state.get("seleccion_cp")
-        if cp_selection is not None:
-            st.caption("Modelo de producción CP elegido en validación: "+cp_selection.method+". El resultado es producción esperada, no orden de fabricación.")
-        st.write("Pronóstico estable con la LSTM validada, sin reentrenarla desde cero. Demanda CP utiliza el método elegido por validación recursiva; producción CP conserva el método seleccionado en su validación.")
-        demand_choice=st.session_state.get("seleccion_demanda_cp")
-        if demand_choice is not None:
-            st.info("Demanda CP — método seleccionado con horizonte de 12 semanas: "+demand_choice.method)
-        if int(horizon)!=12:
-            st.warning("La selección del método de demanda CP se validó para 12 semanas; el horizonte actual es distinto. Utiliza 12 semanas para comparar rigurosamente con los resultados de validación.")
-        if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
+        st.subheader("Pronóstico para planificación agregada y PMP")
+        selection=st.session_state.get("demand_choice")
+        if selection:
+            st.caption("Demanda CP: "+selection.method+" (seleccionado en validación de horizonte). Demanda MQ: LSTM.")
+        if int(weeks)>12:
+            st.warning("La comparación de modelos se validó hasta 12 semanas. Para horizontes mayores, realiza una evaluación específica.")
+        if st.button("Generar pronóstico",type="primary",use_container_width=True):
             try:
-                fcs={}
-                cp_selection=st.session_state.get("seleccion_cp")
-                demand_choice=st.session_state.get("seleccion_demanda_cp")
+                forecasts={}
                 for name,fit in fits.items():
-                    with st.spinner(f"Generando futuro: {name}…"):
-                        if name=="Producción de corte propio" and cp_selection is not None and cp_selection.method!="LSTM original":
-                            continue
-                        if name=="Demanda de corte propio" and demand_choice is not None:
-                            fcs[name]=forecast_demand_selected(fit,demand_choice,start_plan,int(horizon))
-                        else:
-                            fcs[name]=forecast_lstm_verified(fit,start_plan,int(horizon))
-                if cp_selection is not None and cp_selection.method!="LSTM original":
-                    fcs["Producción de corte propio"]=forecast_cp_intermittent(
-                        fits["Producción de corte propio"],cp_selection,
-                        fcs["Demanda de maquila"]["fecha_inicio"])
-                st.session_state["pronosticos"]=make_forecast_table(fcs)
-                st.success("Pronósticos generados. Ya puedes descargarlos para tu planificación agregada y PMP.")
-            except Exception as exc:
-                st.error(f"No fue posible generar el pronóstico: {exc}")
-        forecast=st.session_state.get("pronosticos")
+                    if name=="Demanda de corte propio" and selection:
+                        forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
+                    elif name=="Producción de corte propio" and st.session_state.get("cp_choice") is not None and st.session_state["cp_choice"].method!="LSTM original":
+                        # La producción histórica no determina cantidades de planificación.
+                        dates=forecasts["Demanda de maquila"]["fecha_inicio"]
+                        forecasts[name]=forecast_intermitente(fit,st.session_state["cp_choice"],dates)
+                    else:
+                        forecasts[name]=forecast_lstm_verified(fit,start,int(weeks))
+                st.session_state["forecast"]=make_forecast_table(forecasts)
+                st.success("Pronóstico generado.")
+            except Exception as e:
+                st.error("No fue posible pronosticar: "+type(e).__name__+": "+str(e))
+        forecast=st.session_state.get("forecast")
         if forecast is not None:
-            display=forecast.rename(columns={
-                "fecha_inicio":"Semana desde","fecha_fin":"Semana hasta",
+            view=forecast.copy()
+            view["fecha_inicio"]=pd.to_datetime(view.fecha_inicio).dt.date
+            view["fecha_fin"]=pd.to_datetime(view.fecha_fin).dt.date
+            show=view.rename(columns={"fecha_inicio":"Semana desde","fecha_fin":"Semana hasta",
                 "demanda_mq":"Demanda MQ","demanda_cp":"Demanda CP","demanda_total":"Demanda total",
-                "produccion_cp":"Producción CP","produccion_total_referencia":"Producción total de referencia",
-            }).copy()
-            for key in list(display.columns)[2:]:
-                display[key]=np.rint(display[key].to_numpy(float)).astype(int)
-            st.dataframe(display,hide_index=True,use_container_width=True)
-            plot=go.Figure()
-            for c,color in [("demanda_mq","#1B365D"),("demanda_cp","#C39B00"),("produccion_cp","#26816F")]:
-                plot.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[c],name=c.replace("_"," ").capitalize(),mode="lines+markers",line=dict(color=color)))
-            plot.update_layout(height=350,template="plotly_white",margin=dict(l=10,r=10,t=20,b=10),yaxis_title="Unidades semanales")
-            st.plotly_chart(plot,use_container_width=True)
-            st.caption("La producción CP estimada refleja la evolución histórica, no determina cuánto debe fabricar el taller. La planificación de corte propio debe calcularse a partir de demanda, inventarios y capacidades. Producción total de referencia = demanda MQ (supuesto bajo pedido) + producción CP estimada.")
-
-            # Reporte reproducible con métricas y series temporales; el archivo de origen se conserva sin alterar.
+                "produccion_cp":"Producción CP histórica estimada","produccion_total_referencia":"Producción total de referencia"})
+            numeric=list(show.columns)[2:]
+            show[numeric]=show[numeric].round().astype(int)
+            st.dataframe(show,hide_index=True,use_container_width=True)
+            fig=go.Figure()
+            for field,label in [("demanda_mq","Maquila"),("demanda_cp","Corte propio"),("demanda_total","Demanda total")]:
+                fig.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[field],name=label,mode="lines+markers"))
+            fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
+            st.plotly_chart(fig,use_container_width=True)
+            st.caption("Planificación CP = función de demanda, inventario y capacidad. La producción histórica estimada, si se activa, NO es la orden de fabricación.")
+            buffer=BytesIO()
             try:
-                buffer=BytesIO()
-                rows=[]
-                valid_frames=[]
-                test_frames=[]
-                for name,fit in fits.items():
-                    for stage,m in [("Entrenamiento",fit.train_metrics),("Validación",fit.validation_metrics),
-                                    ("Prueba",tests[name][1]),("Referencia validación",fit.baseline_validation_metrics),
-                                    ("Referencia prueba",tests[name][2])]:
-                        rows.append({"Serie":name,"Etapa":stage,**m,"Mejor época":fit.best_epoch,
-                                     "Semanas entrenamiento":len(fit.training),"Semanas validación":len(fit.validation),
-                                     "Semanas prueba":len(fit.idx_test)})
-                    for stage,values,periods in [("Prueba recursiva 12 sem",tests[name][4],len(tests[name][3])),
-                                                   ("Referencia recursiva 12 sem",tests[name][5],len(tests[name][3]))]:
-                        rows.append({"Serie":name,"Etapa":stage,**values,"Mejor época":fit.best_epoch,
-                                     "Semanas entrenamiento":len(fit.training),"Semanas validación":len(fit.validation),
-                                     "Semanas prueba":periods})
-                    v=fit.validation.copy();v.insert(0,"Serie",name);valid_frames.append(v)
-                    t=tests[name][0].copy();t.insert(0,"Serie",name);t.insert(1,"Tipo","Un paso");test_frames.append(t)
-                    br=tests[name][3].copy();br.insert(0,"Serie",name);br.insert(1,"Tipo","Recursivo 12 semanas");test_frames.append(br)
-                cp_selection=st.session_state.get("seleccion_cp")
-                tests_for_export=tests.copy()
-                if cp_selection is not None and cp_selection.method!="LSTM original":
-                    cp_result=evaluate_cp_intermittent(fits["Producción de corte propio"],cp_selection)
-                    if cp_result is not None:
-                        cp_table,cp_metrics,cp_recursive=cp_result
-                        rows.append({"Serie":"Producción de corte propio","Etapa":"Prueba "+cp_selection.method,**cp_metrics,"Mejor época":None,
-                                     "Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":len(cp_table)})
-                        rows.append({"Serie":"Producción de corte propio","Etapa":"Prueba recursiva "+cp_selection.method,**cp_recursive,"Mejor época":None,
-                                     "Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":min(12,len(cp_table))})
-                        revised=tests["Producción de corte propio"][0].merge(cp_table[["fecha_inicio","Pronóstico_intermitente"]],on="fecha_inicio",how="left",validate="one_to_one")
-                        revised["LSTM"]=revised["Pronóstico_intermitente"]
-                        tests_for_export["Producción de corte propio"]=(revised,*tests["Producción de corte propio"][1:])
-                        cp_table_export=cp_table.copy()
-                        cp_table_export.insert(0,"Serie","Producción de corte propio")
-                        cp_table_export.insert(1,"Tipo","Prueba "+cp_selection.method)
-                        test_frames.append(cp_table_export)
-                demand_choice=st.session_state.get("seleccion_demanda_cp")
-                if demand_choice is not None:
-                    selected_t,selected_m=evaluate_demand_test(fits["Demanda de corte propio"],demand_choice,12)
-                    rows.append({"Serie":"Demanda de corte propio","Etapa":"Prueba recursiva seleccionada: "+demand_choice.method,**selected_m,"Mejor época":None,"Semanas entrenamiento":None,"Semanas validación":None,"Semanas prueba":len(selected_t)})
-                    selected_export=selected_t.copy()
-                    selected_export.insert(0,"Serie","Demanda de corte propio")
-                    selected_export.insert(1,"Tipo","Recursivo seleccionado "+demand_choice.method)
-                    test_frames.append(selected_export)
-                for total_label,(table,m,b) in combined_test_metrics(tests_for_export).items():
-                    for stage,values in [("Prueba total",m),("Referencia prueba total",b)]:
-                        rows.append({"Serie":total_label,"Etapa":stage,**values,"Mejor época":None,
-                                     "Semanas entrenamiento":None,"Semanas validación":None,
-                                     "Semanas prueba":len(table)})
-                meta=pd.DataFrame([
-                    ("Archivo",upload.name),("SHA256",sha256(content).hexdigest()),
-                    ("Fecha última semana cerrada",str(info["fecha_ultima_semana"])),
-                    ("Inicio pronóstico",str(start_plan)),("Horizonte semanal",int(horizon)),
-                    ("Versión metodológica","v2 pronóstico estable sin reajuste"),
-                     ("Método demanda CP seleccionado",demand_choice.method if demand_choice else "LSTM validada"),
-                     ("Método producción CP seleccionado",cp_selection.method if cp_selection else "LSTM original"),
-                     ("Origen de registros","Declarado en el libro cargado; verificar con documentación del taller"),
-                    ("Separación",f"{train_pct}% TRAIN, {val_pct}% VALIDACIÓN, {100-train_pct-val_pct}% TEST"),
-                    ("Ventana",config.lookback),("Unidades LSTM",config.units),
-                    ("Épocas máximas",config.epochs),("Semilla",config.seed),
-                    ("Total de producción","MQ demanda + CP producción pronosticada (supuesto)"),
-                    ("Fuente declarada",", ".join(info["fuentes_declaradas"]) or "No especificada"),
-                ],columns=["Parámetro","Valor"])
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:
-                    display.to_excel(writer,sheet_name="PRONOSTICO_12S",index=False)
-                    pd.DataFrame(rows).to_excel(writer,sheet_name="METRICAS",index=False)
-                    pd.concat(valid_frames,ignore_index=True).to_excel(writer,sheet_name="VALIDACION",index=False)
-                    pd.concat(test_frames,ignore_index=True).to_excel(writer,sheet_name="PRUEBA",index=False)
+                    show.to_excel(writer,sheet_name="PRONOSTICO",index=False)
+                    metric_rows=[]
+                    val_tables=[];test_tables=[]
+                    for name,f in fits.items():
+                        for phase,m in [("Entrenamiento",f.train_metrics),("Validación",f.validation_metrics),
+                                        ("Referencia validación",f.baseline_validation_metrics),
+                                        ("Prueba",tests[name][1]),("Referencia prueba",tests[name][2]),
+                                        ("Prueba recursiva LSTM",tests[name][4]),
+                                        ("Referencia recursiva",tests[name][5])]:
+                            metric_rows.append({"Serie":name,"Etapa":phase,**m})
+                        v=f.validation.copy();v.insert(0,"Serie",name);val_tables.append(v)
+                        t=tests[name][0].copy();t.insert(0,"Serie",name);test_tables.append(t)
+                    if selection:
+                        result,m=evaluate_demand_test(fits["Demanda de corte propio"],selection,12)
+                        metric_rows.append({"Serie":"Demanda de corte propio","Etapa":"Prueba recursiva método elegido: "+selection.method,**m})
+                        selection.comparison.to_excel(writer,sheet_name="COMPARACION_CP",index=False)
+                    pd.DataFrame(metric_rows).to_excel(writer,sheet_name="METRICAS",index=False)
+                    pd.concat(val_tables,ignore_index=True).to_excel(writer,sheet_name="VALIDACION",index=False)
+                    pd.concat(test_tables,ignore_index=True).to_excel(writer,sheet_name="PRUEBA",index=False)
+                    meta=pd.DataFrame([("Archivo",file.name),("SHA256",sha256(payload).hexdigest()),
+                        ("Origen declarado",", ".join(info["fuentes_declaradas"]) if info["fuentes_declaradas"] else "No declarado"),
+                        ("Fin de historial",str(info["fecha_ultima_semana"])),
+                        ("Modelo demanda MQ","LSTM validada"),
+                        ("Modelo demanda CP",selection.method if selection else "LSTM"),
+                        ("Ventana",settings.lookback),("Épocas máximas",settings.epochs),("Unidades LSTM",settings.units),
+                        ("Semilla",settings.seed),("Entrenamiento",train),("Validación",val),
+                        ("Horizonte",int(weeks)),("Inicio plan",str(start)),
+                        ("Nota","Producción CP estimada es informativa; planificación requiere inventarios y capacidad.")],columns=["Dato","Valor"])
                     meta.to_excel(writer,sheet_name="FICHA_TECNICA",index=False)
-                    from openpyxl.styles import PatternFill,Font,Alignment
                     for ws in writer.book.worksheets:
-                        ws.freeze_panes="A2"
-                        ws.auto_filter.ref=ws.dimensions
-                        for cell in ws[1]:
-                            cell.fill=PatternFill("solid",fgColor="FFF200")
-                            cell.font=Font(bold=True,color="1D1D1D")
-                            cell.alignment=Alignment(wrap_text=True,vertical="center")
-                        ws.row_dimensions[1].height=32
-                        for cells in ws.columns:
-                            letter=cells[0].column_letter
-                            limit=min(31,max(13,max(len(str(v.value or "")) for v in cells[:min(35,len(cells))])+2))
-                            ws.column_dimensions[letter].width=limit
-                st.download_button("⬇ Descargar pronóstico, métricas y validación (Excel)",data=buffer.getvalue(),
-                                   file_name="REPORTE_LSTM_DEMANDA_PRODUCCION.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",type="primary",use_container_width=True)
-            except Exception as exc:
-                st.error(f"No se pudo preparar el informe Excel: {exc}")
-            st.download_button("⬇ Descargar pronóstico (CSV)",data=display.to_csv(index=False,sep=";").encode("utf-8-sig"),
-                               file_name="PRONOSTICO_12_SEMANAS.csv",mime="text/csv",use_container_width=True)
-
+                        ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
+                        ws.row_dimensions[1].height=28
+                        from openpyxl.styles import PatternFill,Font
+                        for c in ws[1]:
+                            c.fill=PatternFill("solid",fgColor="FFF200")
+                            c.font=Font(color="111111",bold=True)
+                        for col in ws.columns:
+                            from openpyxl.utils import get_column_letter
+                            width=min(40,max(12,max(len(str(c.value or "")) for c in list(col)[:40])+2))
+                            ws.column_dimensions[get_column_letter(col[0].column)].width=width
+                st.download_button("Descargar pronóstico y reporte de tesis (Excel)",data=buffer.getvalue(),
+                    file_name="PRONOSTICO_LSTM_PARA_PLANIFICACION.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",use_container_width=True)
+            except Exception as e:
+                st.error("No se pudo generar el reporte Excel: "+str(e))
+            st.download_button("Descargar pronóstico CSV",data=show.to_csv(index=False,sep=";").encode("utf-8-sig"),
+                               file_name="PRONOSTICO_PARA_PLANIFICACION.csv",mime="text/csv")
 st.divider()
-st.caption("Investigación de Ingeniería Industrial · Datos y pronósticos por semana · Valores esperados; comprobar factibilidad con las capacidades de estaciones y operarios antes de programar pedidos.")
+st.caption("Investigación de Ingeniería Industrial · Evaluar capacidad, inventarios y costos antes de convertir demanda pronosticada en órdenes de producción.")

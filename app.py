@@ -119,23 +119,30 @@ with t2:
     else:
         st.subheader("Validación de demanda")
         rows=[]
+        reference_rows=[]
         for name,fit in fits.items():
-            rows.append({"Serie":name,"Modelo":"LSTM","Etapa":"Validación",**fit.validation_metrics})
-            rows.append({"Serie":name,"Modelo":"Persistencia","Etapa":"Validación",**fit.baseline_validation_metrics})
+            row={"Serie":name,"Modelo":"LSTM","Etapa":"Validación",**fit.validation_metrics}
+            base_row={"Serie":name,"Modelo":"Persistencia","Etapa":"Validación",**fit.baseline_validation_metrics}
+            if name.startswith("Demanda"):
+                rows.append(row)
+            reference_rows.extend([row,base_row])
         st.dataframe(pd.DataFrame(rows).round(3),hide_index=True,use_container_width=True)
+        st.caption("Se muestran los indicadores LSTM de las dos demandas; las referencias completas se conservan abajo y en el Excel.")
         selected=st.session_state.get("demand_choice")
         if selected is not None:
             row=selected.comparison.iloc[0]
             st.caption("Demanda CP a "+str(selected.horizon)+" semanas: mejor método por MAE de validación = "+selected.method+
                        "; MAE = "+format(row["MAE"],".2f")+".")
-        series_choice=st.selectbox("Gráfico de validación",list(fits.keys()),key="valid_series")
+        series_choice=st.selectbox("Gráfico de validación",["Demanda de maquila","Demanda de corte propio"],key="valid_series")
         f=fits[series_choice]
         fig=go.Figure()
         for label,field,color in [("Real","real","#1B365D"),("LSTM","LSTM","#C39B00"),("Persistencia","Referencia_ultimo_valor","#8A8A8A")]:
             fig.add_trace(go.Scatter(x=f.validation.fecha_inicio,y=f.validation[field],name=label,mode="lines+markers",line_color=color))
         fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
         st.plotly_chart(fig,use_container_width=True)
-        with st.expander("Comparaciones técnicas y curva de aprendizaje"):
+        with st.expander("Comparaciones metodológicas y curva de aprendizaje"):
+            st.markdown("**Comparación con persistencia (validación)**")
+            st.dataframe(pd.DataFrame(reference_rows).round(3),hide_index=True,use_container_width=True)
             if selected is not None:
                 st.markdown("**Métodos de demanda CP: pronóstico recursivo**")
                 st.dataframe(selected.comparison.round(3),hide_index=True,use_container_width=True)
@@ -163,19 +170,31 @@ with t3:
                     st.error("Error en prueba: "+str(e))
         tests=st.session_state.get("tests")
         if tests:
-            r=[]
+            main_rows=[]
+            detail_rows=[]
             for name,values in tests.items():
-                f=fits[name]; one, m,b,rolling,rm,rb=values
-                r.extend([{"Serie":name,"Método":"LSTM, un paso","Semanas":len(one),**m},
-                          {"Serie":name,"Método":"Persistencia, un paso","Semanas":len(one),**b},
-                          {"Serie":name,"Método":"LSTM, recursivo 12","Semanas":len(rolling),**rm},
-                          {"Serie":name,"Método":"Persistencia fija, recursivo 12","Semanas":len(rolling),**rb}])
+                one,m,b,rolling,rm,rb=values
+                if name.startswith("Demanda"):
+                    main_rows.append({"Serie":name,"Método":"LSTM recursiva (12 semanas)","Semanas":len(rolling),**rm})
+                detail_rows.extend([
+                    {"Serie":name,"Método":"LSTM, un paso","Semanas":len(one),**m},
+                    {"Serie":name,"Método":"Persistencia, un paso","Semanas":len(one),**b},
+                    {"Serie":name,"Método":"LSTM, recursivo 12","Semanas":len(rolling),**rm},
+                    {"Serie":name,"Método":"Persistencia fija, recursivo 12","Semanas":len(rolling),**rb}])
             selected=st.session_state.get("demand_choice")
             if selected:
                 chosen_table,chosen_metrics=evaluate_demand_test(fits["Demanda de corte propio"],selected,12)
-                r.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
-            st.dataframe(pd.DataFrame(r).round(3),hide_index=True,use_container_width=True)
-            choice=st.selectbox("Gráfico de prueba",list(tests.keys()),key="test_series")
+                if selected.method!="LSTM validada":
+                    main_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" (elegido en validación)","Semanas":len(chosen_table),**chosen_metrics})
+                detail_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
+            st.caption("Resultado principal: pronóstico recursivo de 12 semanas, comparable al horizonte que se utilizará para planificar.")
+            st.dataframe(pd.DataFrame(main_rows).round(3),hide_index=True,use_container_width=True)
+            if any(pd.notna(row.get("R²")) and row["R²"]<0 for row in main_rows):
+                st.info("Un R² negativo indica que la predicción no reproduce suficientemente la variación de esa serie. Se informa tal cual, sin modificar los datos de prueba.")
+            with st.expander("Ver todas las pruebas y métodos de referencia"):
+                st.dataframe(pd.DataFrame(detail_rows).round(3),hide_index=True,use_container_width=True)
+                st.caption("Un paso usa valores reales de la semana anterior. Recursivo de 12 semanas no utiliza valores reales intermedios.")
+            choice=st.selectbox("Gráfico de prueba",["Demanda de maquila","Demanda de corte propio"],key="test_series")
             test_df=tests[choice][3]
             fig=go.Figure()
             fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.real,name="Real",mode="lines+markers"))

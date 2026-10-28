@@ -46,7 +46,7 @@ if required_password:
         st.stop()
 
 st.title("Pronóstico de demanda y producción de jeans")
-st.caption("Redes LSTM independientes · Evaluación temporal · Horizonte de 12 semanas · Modalidades maquila y corte propio")
+st.caption("Pronóstico semanal · Validación cronológica · Demanda de maquila y corte propio · Producción como análisis complementario")
 
 with st.sidebar:
     st.header("Configuración")
@@ -73,7 +73,10 @@ if upload is None:
 content=upload.getvalue()
 try:
     book=pd.ExcelFile(BytesIO(content))
-    sheet=st.selectbox("Hoja del archivo",book.sheet_names,index=(book.sheet_names.index("DEMANDA") if "DEMANDA" in book.sheet_names else 0))
+    if "DEMANDA" not in book.sheet_names:
+        raise ValueError("El archivo debe incluir la hoja oficial DEMANDA.")
+    sheet="DEMANDA"
+    st.caption("Hoja utilizada: DEMANDA. La aplicación conserva las fechas y los registros cargados sin alterarlos.")
     raw=pd.read_excel(BytesIO(content),sheet_name=sheet,header=0)
     data,info=prepare_base(raw)
 except Exception as exc:
@@ -114,8 +117,6 @@ with st.expander("Ver datos históricos y ficha técnica",expanded=False):
     if info["diferencias_en_total_archivo"]:
         st.warning(f"El total de producción del archivo difiere de maquila + corte propio en {info['diferencias_en_total_archivo']} filas. Los pronósticos de totales se calcularán por suma explícita.")
 
-if sheet!="DEMANDA":
-    st.warning("EXPERIMENTO CON DATOS SINTÉTICOS: los resultados de esta hoja NO son evidencia predictiva sobre la producción real del taller.")
 series={}
 try:
     for name,target in TARGETS.items():
@@ -135,8 +136,8 @@ with st.expander("Gráfica del historial",expanded=False):
 train_tab,valid_tab,test_tab,pred_tab=st.tabs(["2. Entrenamiento","3. Validación","4. Prueba","5. Pronóstico final"])
 
 with train_tab:
-    st.markdown("#### Entrenar las tres series")
-    st.write("Se entrenan **tres redes LSTM**, con conjuntos cronológicos de entrenamiento, validación y prueba independientes para cada serie. La normalización se ajusta solo con entrenamiento.")
+    st.markdown("#### Entrenar modelos de las tres series")
+    st.write("Se entrenan **tres LSTM** sobre series cronológicas independientes. Las referencias y alternativas se comparan en validación. La normalización usa únicamente entrenamiento.")
     if st.button("Entrenar modelos LSTM",type="primary",use_container_width=True):
         st.session_state.pop("ajustes",None)
         st.session_state.pop("pruebas",None)
@@ -280,7 +281,7 @@ with pred_tab:
     if not fits or not tests:
         st.info("Para generar el pronóstico final, primero entrena los modelos y evalúa PRUEBA.")
     else:
-        st.markdown("#### Pronóstico para la planificación de producción")
+        st.markdown("#### Pronóstico semanal para planificación agregada y PMP")
         cp_selection=st.session_state.get("seleccion_cp")
         if cp_selection is not None:
             st.caption("Modelo de producción CP elegido en validación: "+cp_selection.method+". El resultado es producción esperada, no orden de fabricación.")
@@ -326,7 +327,7 @@ with pred_tab:
                 plot.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[c],name=c.replace("_"," ").capitalize(),mode="lines+markers",line=dict(color=color)))
             plot.update_layout(height=350,template="plotly_white",margin=dict(l=10,r=10,t=20,b=10),yaxis_title="Unidades semanales")
             st.plotly_chart(plot,use_container_width=True)
-            st.caption("Producción total de referencia = demanda de maquila (supuesto de producción bajo pedido) + producción pronosticada de corte propio. No es una medición independiente de producción de maquila.")
+            st.caption("La producción CP estimada refleja la evolución histórica, no determina cuánto debe fabricar el taller. La planificación de corte propio debe calcularse a partir de demanda, inventarios y capacidades. Producción total de referencia = demanda MQ (supuesto bajo pedido) + producción CP estimada.")
 
             # Reporte reproducible con métricas y series temporales; el archivo de origen se conserva sin alterar.
             try:
@@ -386,7 +387,7 @@ with pred_tab:
                     ("Versión metodológica","v2 pronóstico estable sin reajuste"),
                      ("Método demanda CP seleccionado",demand_choice.method if demand_choice else "LSTM validada"),
                      ("Método producción CP seleccionado",cp_selection.method if cp_selection else "LSTM original"),
-                     ("Tipo de datos","EXPERIMENTAL/SINTÉTICO" if sheet!="DEMANDA" else "Base principal; verificar trazabilidad"),
+                     ("Origen de registros","Declarado en el libro cargado; verificar con documentación del taller"),
                     ("Separación",f"{train_pct}% TRAIN, {val_pct}% VALIDACIÓN, {100-train_pct-val_pct}% TEST"),
                     ("Ventana",config.lookback),("Unidades LSTM",config.units),
                     ("Épocas máximas",config.epochs),("Semilla",config.seed),

@@ -361,9 +361,12 @@ def make_forecast_table(forecasts: dict[str,pd.DataFrame]) -> pd.DataFrame:
     data["demanda_total"]=data["demanda_mq"]+data["demanda_cp"]
     # Total conforme a la regla operativa del libro cargado:
     # demanda maquila asumida como producción MQ + producción registrada/pronosticada CP.
-    data["produccion_total_referencia"]=data["demanda_mq"]+data["produccion_cp"]
+    if "produccion_cp" in data.columns:
+        data["produccion_total_referencia"]=data["demanda_mq"]+data["produccion_cp"]
     data["fecha_fin"]=pd.to_datetime(data["fecha_inicio"])+pd.Timedelta(days=4)
-    ordered=["fecha_inicio","fecha_fin","demanda_mq","demanda_cp","demanda_total","produccion_cp","produccion_total_referencia"]
+    ordered=["fecha_inicio","fecha_fin","demanda_mq","demanda_cp","demanda_total"]
+    if "produccion_cp" in data.columns:
+        ordered+=["produccion_cp","produccion_total_referencia"]
     data=data[ordered]
     for c in ordered[2:]:
         data[c]=data[c].clip(lower=0)
@@ -382,6 +385,8 @@ def combined_test_metrics(tests: dict[str,tuple]) -> dict[str,tuple[pd.DataFrame
     }
     result={}
     for label,(a,b) in specs.items():
+        if a not in tests or b not in tests:
+            continue
         xa=tests[a][0]
         xb=tests[b][0]
         merged=xa.merge(xb,on="fecha_inicio",suffixes=("_a","_b"),how="inner",validate="one_to_one")

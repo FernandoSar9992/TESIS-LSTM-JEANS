@@ -21,6 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from produccion_intermitente import select_by_validation, evaluate_test as evaluate_cp_intermittent, forecast_future as forecast_cp_intermittent
 from motor_lstm import (APP_TIMEZONE, TARGETS, Settings, extract_series, final_test, combined_test_metrics,
                         fit_one, full_refit_forecast, make_forecast_table, recursive_test,
                         prepare_base, metrics)
@@ -85,7 +86,7 @@ if st.session_state.get("forecast_signature") != forecast_signature:
     st.session_state.pop("pronosticos",None)
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
-    for key in ("ajustes","pruebas","pronosticos"):
+    for key in ("ajustes","pruebas","pronosticos","seleccion_cp"):
         st.session_state.pop(key,None)
 
 c1,c2,c3,c4=st.columns(4)
@@ -138,6 +139,7 @@ with train_tab:
         st.session_state.pop("pruebas",None)
         st.session_state.pop("pronosticos",None)
         fitted={}
+        st.session_state.pop("seleccion_cp",None)
         bar=st.progress(0)
         try:
             import tensorflow as tf
@@ -147,6 +149,7 @@ with train_tab:
                     fitted[name]=fit_one(name,frame,config)
                 bar.progress(n/len(series))
             st.session_state["ajustes"]=fitted
+            st.session_state["seleccion_cp"]=select_by_validation(fitted["Producción de corte propio"])
             st.success("Entrenamiento y validación finalizados. Continúa en la pestaña Validación.")
         except ImportError as exc:
             st.error("No se pudo importar TensorFlow o una de sus dependencias.")
@@ -160,6 +163,12 @@ with valid_tab:
         st.info("Primero ejecuta el entrenamiento en la pestaña anterior.")
     else:
         st.markdown("#### Resultados de validación")
+        cp_selection=st.session_state.get("seleccion_cp")
+        if cp_selection is not None:
+            st.markdown("#### Comparación: producción intermitente de corte propio")
+            st.dataframe(cp_selection.comparison,hide_index=True,use_container_width=True)
+            st.info(f"Modelo de producción elegido únicamente por MAE de validación: {cp_selection.method}. TEST no participa en la selección.")
+
         summary=[]
         for name,fit in fits.items():
             for stage,values in [("Entrenamiento",fit.train_metrics),("Validación",fit.validation_metrics),("Referencia validación",fit.baseline_validation_metrics)]:
@@ -207,6 +216,13 @@ with test_tab:
             for name,(table,m,b,backtest,rm,rb) in tests.items():
                 test_rows.append({"Variable":name,"Modelo":"LSTM","Semanas":len(table),**m})
                 test_rows.append({"Variable":name,"Modelo":"Persistencia","Semanas":len(table),**b})
+            cp_selection=st.session_state.get("seleccion_cp")
+            if cp_selection is not None and cp_selection.method!="LSTM original":
+                cp_comparison=evaluate_cp_intermittent(fits["Producción de corte propio"],cp_selection)
+                if cp_comparison is not None:
+                    cp_table,cp_metrics,cp_recursive=cp_comparison
+                    test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method,"Semanas":len(cp_table),**cp_metrics})
+                    test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method+" recursivo 12 semanas","Semanas":min(12,len(cp_table)),**cp_recursive})
             totals=combined_test_metrics(tests)
             for total_label,(table,m,b) in totals.items():
                 test_rows.append({"Variable":total_label,"Modelo":"Suma LSTM","Semanas":len(table),**m})
@@ -241,6 +257,9 @@ with pred_tab:
         st.info("Para generar el pronóstico final, primero entrena los modelos y evalúa PRUEBA.")
     else:
         st.markdown("#### Pronóstico para la planificación de producción")
+        cp_selection=st.session_state.get("seleccion_cp")
+        if cp_selection is not None:
+            st.caption("Modelo de producción CP elegido en validación: "+cp_selection.method+". El resultado es producción esperada, no orden de fabricación.")
         st.write("El modelo final se reajusta con el histórico cerrado, manteniendo la arquitectura fija y las épocas seleccionadas con validación. No vuelve a seleccionar hiperparámetros en prueba.")
         if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
             try:
@@ -248,6 +267,11 @@ with pred_tab:
                 for name,fit in fits.items():
                     with st.spinner(f"Generando futuro: {name}…"):
                         fcs[name]=full_refit_forecast(fit,start_plan,int(horizon))
+                cp_selection=st.session_state.get("seleccion_cp")
+                if cp_selection is not None and cp_selection.method!="LSTM original":
+                    fcs["Producción de corte propio"]=forecast_cp_intermittent(
+                        fits["Producción de corte propio"],cp_selection,
+                        fcs["Demanda de maquila"]["fecha_inicio"])
                 st.session_state["pronosticos"]=make_forecast_table(fcs)
                 st.success("Pronósticos generados. Ya puedes descargarlos para tu planificación agregada y PMP.")
             except Exception as exc:

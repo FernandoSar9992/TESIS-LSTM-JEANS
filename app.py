@@ -22,8 +22,8 @@ from produccion_intermitente import (select_by_validation,evaluate_test as test_
                                      forecast_future as forecast_intermitente)
 
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
-st.title("Pronóstico semanal de demanda de jeans")
-st.caption("Maquila y corte propio · LSTM · Validación cronológica · Entradas para planificación agregada y PMP")
+st.title("Pronóstico semanal de demanda y producción de jeans")
+st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -37,8 +37,8 @@ with st.sidebar:
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
-    optional=st.checkbox("Incluir análisis complementario de producción CP",value=False,
-                         help="La producción depende de decisiones de reposición de inventario; no es una restricción de capacidad.")
+    optional=st.checkbox("Incluir pronóstico de producción CP",value=True,
+                         help="Activado por defecto. La producción histórica refleja decisiones de inventario; no equivale al programa de fabricación.")
     with st.expander("Detalles de evaluación",expanded=False):
         train=st.slider("Entrenamiento (%)",60,80,70,5)
         val=st.slider("Validación (%)",10,20,15,5)
@@ -87,8 +87,8 @@ with st.expander("Datos y trazabilidad"):
 
 t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
 with t1:
-    st.subheader("Entrenar LSTM de demanda")
-    st.write("La producción CP es opcional. Las dos series de demanda se entrenan por separado, con escalado ajustado solo en entrenamiento.")
+    st.subheader("Entrenar LSTM de demanda y producción")
+    st.write("Se entrenan las dos demandas y, por defecto, producción CP. Cada serie tiene su propia LSTM y el escalado se ajusta solo con entrenamiento.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
         for k in ("fits","tests","forecast","cp_choice","demand_choice"):
             st.session_state.pop(k,None)
@@ -211,7 +211,10 @@ with t4:
         st.subheader("Pronóstico para planificación agregada y PMP")
         selection=st.session_state.get("demand_choice")
         if selection:
-            st.caption("Demanda CP: "+selection.method+" (seleccionado en validación de horizonte). Demanda MQ: LSTM.")
+            st.caption("Demanda CP: "+selection.method+" (elegido en validación del horizonte). Demanda MQ: LSTM.")
+        cp_choice=st.session_state.get("cp_choice")
+        if cp_choice is not None:
+            st.caption("Producción CP: "+cp_choice.method+" (modelo elegido en validación; uso descriptivo).")
         if int(weeks)>12:
             st.warning("La comparación de modelos se validó hasta 12 semanas. Para horizontes mayores, realiza una evaluación específica.")
         if st.button("Generar pronóstico",type="primary",use_container_width=True):
@@ -246,7 +249,7 @@ with t4:
                 fig.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[field],name=label,mode="lines+markers"))
             fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
             st.plotly_chart(fig,use_container_width=True)
-            st.caption("Planificación CP = función de demanda, inventario y capacidad. La producción histórica estimada, si se activa, NO es la orden de fabricación.")
+            st.caption("Producción CP estimada: comportamiento histórico pronosticado, NO orden de fabricación. El PMP se calculará usando demanda, inventario disponible, tiempos y capacidad.")
             buffer=BytesIO()
             try:
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:

@@ -223,7 +223,16 @@ with test_tab:
                     cp_table,cp_metrics,cp_recursive=cp_comparison
                     test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method,"Semanas":len(cp_table),**cp_metrics})
                     test_rows.append({"Variable":"Producción de corte propio","Modelo":cp_selection.method+" recursivo 12 semanas","Semanas":min(12,len(cp_table)),**cp_recursive})
-            totals=combined_test_metrics(tests)
+            tests_for_totals=tests.copy()
+            if cp_selection is not None and cp_selection.method!="LSTM original" and cp_comparison is not None:
+                cp_table,cp_metrics,cp_recursive=cp_comparison
+                original=tests["Producción de corte propio"]
+                revised=original[0].merge(cp_table[["fecha_inicio","Pronóstico_intermitente"]],on="fecha_inicio",how="left",validate="one_to_one")
+                if revised["Pronóstico_intermitente"].isna().any():
+                    raise ValueError("Las semanas de prueba de producción no coinciden.")
+                revised["LSTM"]=revised["Pronóstico_intermitente"]
+                tests_for_totals["Producción de corte propio"]=(revised,*original[1:])
+            totals=combined_test_metrics(tests_for_totals)
             for total_label,(table,m,b) in totals.items():
                 test_rows.append({"Variable":total_label,"Modelo":"Suma LSTM","Semanas":len(table),**m})
                 test_rows.append({"Variable":total_label,"Modelo":"Suma persistencia","Semanas":len(table),**b})
@@ -264,10 +273,12 @@ with pred_tab:
         if st.button("Generar pronóstico futuro",type="primary",use_container_width=True):
             try:
                 fcs={}
+                cp_selection=st.session_state.get("seleccion_cp")
                 for name,fit in fits.items():
                     with st.spinner(f"Generando futuro: {name}…"):
+                        if name=="Producción de corte propio" and cp_selection is not None and cp_selection.method!="LSTM original":
+                            continue
                         fcs[name]=full_refit_forecast(fit,start_plan,int(horizon))
-                cp_selection=st.session_state.get("seleccion_cp")
                 if cp_selection is not None and cp_selection.method!="LSTM original":
                     fcs["Producción de corte propio"]=forecast_cp_intermittent(
                         fits["Producción de corte propio"],cp_selection,

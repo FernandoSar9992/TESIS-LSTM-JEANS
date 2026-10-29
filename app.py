@@ -292,10 +292,42 @@ with t4:
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")
+            st.markdown("#### Plan preliminar de reposición de corte propio")
+            st.caption("La producción CP pronosticada por la red describe el historial. Para fabricar, calcule necesidades por inventario y capacidad compartida. Este escenario agregado NO es todavía un PMP optimizado por estaciones.")
+            with st.expander("Configurar reposición e inventario",expanded=True):
+                pc1,pc2,pc3=st.columns(3)
+                inv_ini=pc1.number_input("Inventario CP disponible al inicio",min_value=0,value=0,step=10,help="Ingrese el inventario físico comprobado; no se presupone su valor.")
+                lavado_ini=pc2.number_input("Pantalones CP ya en lavado que llegarán semana 1",min_value=0,value=0,step=10)
+                cap_eq=pc3.number_input("Capacidad conjunta (unidades equivalentes MQ/semana)",min_value=1,value=420,step=10,help="420 es referencia aproximada; validar con tiempos estándar y balanceo.")
+                pc4,pc5,pc6=st.columns(3)
+                cobertura=pc4.slider("Cobertura de inventario CP (semanas)",1,8,4)
+                cuota=pc5.slider("Máximo de capacidad reservado a CP (%)",0,100,40,5,help="Permite reservar un máximo para CP; la capacidad no usada se asigna a maquila.")
+                lote_min=pc6.number_input("Lote mínimo CP de referencia",min_value=0,value=0,step=10)
+                st.caption("Referencias preliminares: TE maquila 22,04 min y TE corte propio 35,16 min. No se han modelado aquí las restricciones de cada máquina ni el plazo de compra de tela.")
+            try:
+                plan=calcular_plan_reposicion(
+                    forecast,int(inv_ini),int(lavado_ini),int(cap_eq),22.04,35.16,
+                    int(cobertura),int(cuota),int(lote_min))
+                p1,p2,p3=st.columns(3)
+                p1.metric("CP a confeccionar en horizonte",f"{int(plan['Producción CP propuesta'].sum()):,}")
+                p2.metric("Maquila pendiente al finalizar",int(plan["Maquila pendiente al cierre"].iloc[-1]))
+                p3.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
+                st.dataframe(plan,hide_index=True,use_container_width=True)
+                if plan["Lote CP bajo mínimo"].any():
+                    st.warning("Algunos lotes CP propuestos quedan por debajo del mínimo indicado. El plan es preliminar: agrupe lotes y valide factibilidad.")
+                if int(plan["Maquila pendiente al cierre"].iloc[-1])>0:
+                    st.warning("El escenario deja pedidos de maquila pendientes. Es necesario redistribuir capacidad o ajustar fechas.")
+                st.download_button("Descargar plan preliminar (CSV)",data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
+                                   file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv",mime="text/csv")
+            except Exception as e:
+                plan=None
+                st.error("No fue posible calcular el escenario de reposición: "+str(e))
             buffer=BytesIO()
             try:
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:
                     show.to_excel(writer,sheet_name="PRONOSTICO",index=False)
+                    if plan is not None:
+                        plan.to_excel(writer,sheet_name="PLAN_REPOSICION",index=False)
                     if plan is not None:
                         plan.to_excel(writer,sheet_name="PLAN_PRELIMINAR",index=False)
                     metric_rows=[]

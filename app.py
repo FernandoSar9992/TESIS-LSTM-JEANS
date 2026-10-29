@@ -18,6 +18,7 @@ from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,extract_series,fit_on
                          final_test,recursive_test,make_forecast_table)
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
                                   forecast_lstm_verified,forecast_demand_selected)
+from planificacion_reposicion import calcular_plan_reposicion
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
 
@@ -37,7 +38,7 @@ with st.sidebar:
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
-    optional=st.checkbox("Incluir pronóstico de producción CP",value=True,
+    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=True,
                          help="Activado por defecto. La producción histórica refleja decisiones de inventario; no equivale al programa de fabricación.")
     with st.expander("Detalles de evaluación",expanded=False):
         train=st.slider("Entrenamiento (%)",60,80,70,5)
@@ -249,11 +250,54 @@ with t4:
                 fig.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[field],name=label,mode="lines+markers"))
             fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
             st.plotly_chart(fig,use_container_width=True)
-            st.caption("Producción CP estimada: comportamiento histórico pronosticado, NO orden de fabricación. El PMP se calculará usando demanda, inventario disponible, tiempos y capacidad.")
+            st.caption("Producción CP estadística = predicción del comportamiento empírico histórico, NO una orden de fabricación. El cálculo de reposición siguiente utiliza demanda, inventario y capacidad.")
+            st.divider()
+            st.subheader("Plan preliminar de reposición de corte propio")
+            st.write("Diferente del pronóstico estadístico: calcula cantidades propuestas a partir de demanda, inventario y capacidad compartida.")
+            with st.expander("Supuestos de reposición y capacidad",expanded=True):
+                left,right=st.columns(2)
+                with left:
+                    stock=st.number_input("Inventario CP disponible al inicio (unidades)",min_value=0,value=0,step=10,
+                        help="Coloca inventario físico verificado, no inventario sintético.")
+                    wash=st.number_input("CP ya confeccionados, aún en lavado (recibir la primera semana)",min_value=0,value=0,step=10)
+                    cover=st.slider("Cobertura objetivo CP (semanas)",1,8,4)
+                    minlot=st.number_input("Lote CP mínimo orientativo",min_value=0,value=80,step=10)
+                with right:
+                    capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10)
+                    te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01)
+                    te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01)
+                    cp_share=st.slider("Máximo de capacidad reservable para CP (%)",0,100,35,5,
+                        help="Cuota máxima orientativa. Si CP requiere capacidad, MQ puede quedar pendiente.")
+            st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
+            plan=None
+            if st.button("Calcular plan preliminar",type="secondary",use_container_width=True):
+                try:
+                    plan=calcular_plan_reposicion(
+                        forecast,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+                    st.session_state["plan_preliminar"]=plan
+                    st.session_state["plan_signature"]=(st.session_state.get("signature"),forecast_key,
+                        stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+                except Exception as exc:
+                    st.error("No se pudo calcular el plan: "+str(exc))
+            keys=(st.session_state.get("signature"),forecast_key,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+            if st.session_state.get("plan_signature")==keys:
+                plan=st.session_state.get("plan_preliminar")
+            if plan is not None:
+                st.dataframe(plan,hide_index=True,use_container_width=True)
+                left,right,third=st.columns(3)
+                left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
+                right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
+                third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
+                st.caption("Este escenario no incorpora precedencias ni restricciones de cada máquina. Una cuota CP mayor puede desplazar maquila. Los lotes mínimos solo se señalan: no se fuerzan ni se inventan capacidades.")
+                st.download_button("Descargar plan preliminar (CSV)",
+                    data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
+                    file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")
             buffer=BytesIO()
             try:
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:
                     show.to_excel(writer,sheet_name="PRONOSTICO",index=False)
+                    if plan is not None:
+                        plan.to_excel(writer,sheet_name="PLAN_PRELIMINAR",index=False)
                     metric_rows=[]
                     val_tables=[];test_tables=[]
                     for name,f in fits.items():

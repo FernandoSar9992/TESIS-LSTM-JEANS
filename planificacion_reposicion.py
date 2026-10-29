@@ -1,5 +1,6 @@
 """Escenario PRELIMINAR de reposición CP: no sustituye PMP ni es LSTM de producción.
 Demanda, inventario inicial, recepción tras lavado y capacidad compartida.
+La reserva CP prioriza capacidad, pero NO impide utilizar holgura adicional.
 El TE de ambas modalidades sirve únicamente para estimar carga equivalente.
 """
 from __future__ import annotations
@@ -54,13 +55,18 @@ def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
         mq_need=int(mq[i])+backlog
         cp_capacity_total=int(math.floor((cap+1e-9)/ratio))
         if reserved<=0:
+            # Sin prioridad para CP: MQ se atiende primero; CP utiliza la holgura.
             prod_mq=min(mq_need,int(math.floor(cap+1e-9)))
             available=cap-prod_mq
             prod_cp=min(need,cp_capacity_total,int(math.floor((available+1e-9)/ratio)))
         else:
-            cp_quota=int(math.floor((cap*reserved+1e-9)/ratio))
-            prod_cp=min(need,cp_capacity_total,cp_quota)
-            prod_mq=min(mq_need,int(math.floor(cap-ratio*prod_cp+1e-9)))
+            # La cuota define capacidad PRIORITARIA de CP, no un tope rígido.
+            # Una vez cubierta MQ con la capacidad restante, CP puede usar
+            # cualquier holgura adicional. Esto evita subutilización del taller.
+            cp_priority=min(need,int(math.floor((cap*reserved/ratio)+1e-9)))
+            prod_mq=min(mq_need,int(math.floor(cap-ratio*cp_priority+1e-9)))
+            available=cap-prod_mq
+            prod_cp=min(need,cp_capacity_total,int(math.floor((available+1e-9)/ratio)))
         backlog=mq_need-prod_mq
         used=prod_mq+ratio*prod_cp
         if used>cap+1e-7:

@@ -295,7 +295,7 @@ with t4:
             view["fecha_fin"]=pd.to_datetime(view.fecha_fin).dt.date
             show=view.rename(columns={"fecha_inicio":"Semana desde","fecha_fin":"Semana hasta",
                 "demanda_mq":"Demanda MQ","demanda_cp":"Demanda CP","demanda_total":"Demanda total",
-                "produccion_cp":"Producción CP histórica estimada","produccion_total_referencia":"Producción total de referencia"})
+                "produccion_cp":"Producción CP estadística estimada","produccion_total_referencia":"Producción total de referencia"})
             numeric=list(show.columns)[2:]
             show[numeric]=show[numeric].round(2)
             st.caption("Pronósticos como cantidades esperadas, con dos decimales. El plan de fabricación realiza su propio redondeo a unidades enteras.")
@@ -322,8 +322,8 @@ with t4:
                     capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10)
                     te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01)
                     te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01)
-                    cp_share=st.slider("Máximo de capacidad reservable para CP (%)",0,100,35,5,
-                        help="Cuota máxima orientativa. Si CP requiere capacidad, MQ puede quedar pendiente.")
+                    cp_share=st.slider("Capacidad prioritaria para CP (%)",0,100,35,5,
+                        help="Porcentaje atendido primero para CP cuando hay necesidad; CP también puede aprovechar capacidad sobrante.")
             st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
             plan=None
             if st.button("Calcular plan preliminar",type="secondary",use_container_width=True):
@@ -344,7 +344,7 @@ with t4:
                 left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
                 right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
                 third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.caption("Este escenario no incorpora precedencias ni restricciones de cada máquina. Una cuota CP mayor puede desplazar maquila. Los lotes mínimos solo se señalan: no se fuerzan ni se inventan capacidades.")
+                st.caption("Este escenario no incorpora precedencias ni restricciones de cada máquina. Una prioridad CP mayor puede desplazar maquila cuando hay saturación. Los lotes mínimos solo se señalan: no se fuerzan ni se inventan capacidades.")
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")

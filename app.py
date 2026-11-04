@@ -21,6 +21,8 @@ from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_te
 from planificacion_reposicion import calcular_plan_reposicion
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
+from protocolo_final import (confirm_pre_sales, select as select_protocol,
+                             evaluate as evaluate_protocol, future as future_protocol)
 
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
@@ -56,16 +58,19 @@ try:
     if "DEMANDA" not in xl.sheet_names:
         raise ValueError("No existe la hoja DEMANDA en el archivo.")
     base,info=prepare_base(pd.read_excel(BytesIO(payload),sheet_name="DEMANDA"))
+    confirm_zeros=st.checkbox("Confirmo que no hubo ventas CP entre la primera producción y el primer registro de demanda",
+                             value=False, help="Solo completa el tramo inicial activo; conserva el Excel original y registra la declaración.")
+    base,zero_trace=confirm_pre_sales(base,confirm_zeros)
     names={"Demanda de maquila":"demanda_mq","Demanda de corte propio":"demanda_cp"}
     if optional: names["Producción de corte propio"]="produccion_cp"
     series={name:extract_series(base,col) for name,col in names.items()}
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-signature=sha256(payload+repr(asdict(settings)).encode()+str(optional).encode()).hexdigest()
+signature=sha256(payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
-    for k in ("fits","tests","forecast","cp_choice","demand_choice"):
+    for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
         st.session_state.pop(k,None)
 forecast_key=(str(start),int(weeks))
 if st.session_state.get("forecast_key")!=forecast_key:
@@ -83,6 +88,8 @@ with st.expander("Datos y trazabilidad"):
     st.caption("Archivo: "+file.name+" | SHA-256: "+sha256(payload).hexdigest())
     st.caption("Origen declarado: "+(", ".join(info["fuentes_declaradas"]) if info["fuentes_declaradas"] else "No declarado. Verificar documentación de origen."))
     st.caption("Los registros se leen sin modificar. Los ceros reales de producción permanecen.")
+    if not zero_trace.empty:
+        st.dataframe(zero_trace,hide_index=True)
     if info["diferencias_en_total_archivo"]:
         st.warning("El campo de producción total del archivo difiere de la suma MQ+CP en "+str(info["diferencias_en_total_archivo"])+" semanas.")
 
@@ -91,7 +98,7 @@ with t1:
     st.subheader("Entrenar LSTM de demanda y producción")
     st.write("Se entrenan las dos demandas y, por defecto, producción CP. Cada serie tiene su propia LSTM y el escalado se ajusta solo con entrenamiento.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
-        for k in ("fits","tests","forecast","cp_choice","demand_choice"):
+        for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
             st.session_state.pop(k,None)
         fitted={}
         progress=st.progress(0)
@@ -106,19 +113,34 @@ with t1:
             st.session_state["demand_choice"]=select_demand_by_validation(fitted["Demanda de corte propio"],min(int(weeks),12))
             if optional:
                 st.session_state["cp_choice"]=select_by_validation(fitted["Producción de corte propio"])
+            with st.spinner("Comparando candidatos a 12 semanas con validación temporal separada"):
+                st.session_state["protocols"]={name:select_protocol(frame,name=="Producción de corte propio",settings)
+                                               for name,frame in series.items()}
             st.success("Entrenamiento y validación completados.")
         except ImportError as e:
+            st.session_state.pop("fits",None)
+            st.session_state.pop("protocols",None)
             st.error("No se pudo importar TensorFlow: "+str(e))
             st.caption("Python: "+sys.version.split()[0])
         except Exception as e:
+            st.session_state.pop("fits",None)
+            st.session_state.pop("protocols",None)
             st.error("No se completó el entrenamiento: "+type(e).__name__+": "+str(e))
 
 fits=st.session_state.get("fits")
+protocols=st.session_state.get("protocols")
 with t2:
     if not fits:
         st.info("Primero entrena en la pestaña 1.")
     else:
-        st.subheader("Validación de demanda")
+        if protocols:
+            st.subheader("Selección común a 12 semanas")
+            st.caption("RMSE como criterio previo para estimar cantidades medias; MAE como desempate. Orígenes solapados, redes congeladas dentro de la evaluación. La cola interna de entrenamiento elige épocas y calibra Duan; la validación externa elige el método.")
+            for name,protocol in protocols.items():
+                st.write(name+": "+protocol['selected'])
+                st.dataframe(protocol['validation'].round(3),hide_index=True)
+            st.caption("Dos etapas usa probabilidad empírica × media positiva y coincide con media histórica. Las comparaciones anteriores a un paso se conservan debajo como diagnóstico.")
+        st.subheader("Diagnóstico del motor anterior: validación de demanda")
         rows=[]
         reference_rows=[]
         for name,fit in fits.items():
@@ -165,12 +187,20 @@ with t3:
                     result={}
                     for name,fit in fits.items():
                         result[name]=(*final_test(fit),*recursive_test(fit,12))
+                    if protocols:
+                        for protocol in protocols.values():
+                            evaluate_protocol(protocol)
                     st.session_state["tests"]=result
                     st.success("Prueba evaluada. No se usó para elegir modelos.")
                 except Exception as e:
                     st.error("Error en prueba: "+str(e))
         tests=st.session_state.get("tests")
         if tests:
+            if protocols:
+                st.subheader("Prueba del protocolo seleccionado sin reajustes")
+                for name,protocol in protocols.items():
+                    st.write(name+": elegido en validación = "+protocol['selected'])
+                    st.dataframe(evaluate_protocol(protocol).round(3),hide_index=True)
             main_rows=[]
             detail_rows=[]
             for name,values in tests.items():
@@ -188,14 +218,15 @@ with t3:
                 if selected.method!="LSTM validada":
                     main_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" (elegido en validación)","Semanas":len(chosen_table),**chosen_metrics})
                 detail_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
-            st.caption("Resultado principal: pronóstico recursivo de 12 semanas, comparable al horizonte que se utilizará para planificar.")
+            st.subheader("Diagnóstico del motor anterior: primer origen de prueba")
+            st.caption("Estas métricas y el gráfico siguiente corresponden a las LSTM anteriores. La selección que genera el pronóstico está en la tabla del protocolo común, arriba; usa todos los orígenes completos.")
             st.dataframe(pd.DataFrame(main_rows).round(3),hide_index=True,use_container_width=True)
             if any(pd.notna(row.get("R²")) and row["R²"]<0 for row in main_rows):
                 st.info("Un R² negativo indica que la predicción no reproduce suficientemente la variación de esa serie. Se informa tal cual, sin modificar los datos de prueba.")
             with st.expander("Ver todas las pruebas y métodos de referencia"):
                 st.dataframe(pd.DataFrame(detail_rows).round(3),hide_index=True,use_container_width=True)
                 st.caption("Un paso usa valores reales de la semana anterior. Recursivo de 12 semanas no utiliza valores reales intermedios.")
-            choice=st.selectbox("Gráfico de prueba",["Demanda de maquila","Demanda de corte propio"],key="test_series")
+            choice=st.selectbox("Gráfico diagnóstico de prueba del motor anterior",["Demanda de maquila","Demanda de corte propio"],key="test_series")
             test_df=tests[choice][3]
             fig=go.Figure()
             fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.real,name="Real",mode="lines+markers"))
@@ -211,10 +242,13 @@ with t4:
     else:
         st.subheader("Pronóstico para planificación agregada y PMP")
         selection=st.session_state.get("demand_choice")
-        if selection:
+        if protocols:
+            for name,protocol in protocols.items():
+                st.caption(name+": "+protocol['selected']+". Reajuste final con todo el historial y épocas congeladas.")
+        elif selection:
             st.caption("Demanda CP: "+selection.method+" (elegido en validación del horizonte). Demanda MQ: LSTM.")
         cp_choice=st.session_state.get("cp_choice")
-        if cp_choice is not None:
+        if cp_choice is not None and not protocols:
             st.caption("Producción CP: "+cp_choice.method+" (modelo elegido en validación; uso descriptivo).")
         if int(weeks)>12:
             st.warning("La comparación de modelos se validó hasta 12 semanas. Para horizontes mayores, realiza una evaluación específica.")
@@ -222,7 +256,9 @@ with t4:
             try:
                 forecasts={}
                 for name,fit in fits.items():
-                    if name=="Demanda de corte propio" and selection:
+                    if protocols:
+                        forecasts[name]=future_protocol(protocols[name],start,int(weeks)).rename(columns={'pronostico':fit.target})
+                    elif name=="Demanda de corte propio" and selection:
                         forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
                     elif name=="Producción de corte propio" and st.session_state.get("cp_choice") is not None and st.session_state["cp_choice"].method!="LSTM original":
                         # La producción histórica no determina cantidades de planificación.
@@ -231,6 +267,8 @@ with t4:
                     else:
                         forecasts[name]=forecast_lstm_verified(fit,start,int(weeks))
                 st.session_state["forecast"]=make_forecast_table(forecasts)
+                st.session_state.pop("plan_preliminar",None)
+                st.session_state.pop("plan_signature",None)
                 st.success("Pronóstico generado.")
             except Exception as e:
                 st.error("No fue posible pronosticar: "+type(e).__name__+": "+str(e))
@@ -251,6 +289,7 @@ with t4:
             fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
             st.plotly_chart(fig,use_container_width=True)
             st.caption("Producción CP estadística = predicción del comportamiento empírico histórico, NO una orden de fabricación. El cálculo de reposición siguiente utiliza demanda, inventario y capacidad.")
+            st.caption("Producción total de referencia supone MQ producida igual a su demanda. Es una suma descriptiva no verificada, no demanda total ni capacidad requerida del plan.")
             st.divider()
             st.subheader("Plan preliminar de reposición de corte propio")
             st.write("Diferente del pronóstico estadístico: calcula cantidades propuestas a partir de demanda, inventario y capacidad compartida.")
@@ -292,40 +331,17 @@ with t4:
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")
-            st.markdown("#### Plan preliminar de reposición de corte propio")
-            st.caption("La producción CP pronosticada por la red describe el historial. Para fabricar, calcule necesidades por inventario y capacidad compartida. Este escenario agregado NO es todavía un PMP optimizado por estaciones.")
-            with st.expander("Configurar reposición e inventario",expanded=True):
-                pc1,pc2,pc3=st.columns(3)
-                inv_ini=pc1.number_input("Inventario CP disponible al inicio",min_value=0,value=0,step=10,help="Ingrese el inventario físico comprobado; no se presupone su valor.")
-                lavado_ini=pc2.number_input("Pantalones CP ya en lavado que llegarán semana 1",min_value=0,value=0,step=10)
-                cap_eq=pc3.number_input("Capacidad conjunta (unidades equivalentes MQ/semana)",min_value=1,value=420,step=10,help="420 es referencia aproximada; validar con tiempos estándar y balanceo.")
-                pc4,pc5,pc6=st.columns(3)
-                cobertura=pc4.slider("Cobertura de inventario CP (semanas)",1,8,4)
-                cuota=pc5.slider("Máximo de capacidad reservado a CP (%)",0,100,40,5,help="Permite reservar un máximo para CP; la capacidad no usada se asigna a maquila.")
-                lote_min=pc6.number_input("Lote mínimo CP de referencia",min_value=0,value=0,step=10)
-                st.caption("Referencias preliminares: TE maquila 22,04 min y TE corte propio 35,16 min. No se han modelado aquí las restricciones de cada máquina ni el plazo de compra de tela.")
-            try:
-                plan=calcular_plan_reposicion(
-                    forecast,int(inv_ini),int(lavado_ini),int(cap_eq),22.04,35.16,
-                    int(cobertura),int(cuota),int(lote_min))
-                p1,p2,p3=st.columns(3)
-                p1.metric("CP a confeccionar en horizonte",f"{int(plan['Producción CP propuesta'].sum()):,}")
-                p2.metric("Maquila pendiente al finalizar",int(plan["Maquila pendiente al cierre"].iloc[-1]))
-                p3.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.dataframe(plan,hide_index=True,use_container_width=True)
-                if plan["Lote CP bajo mínimo"].any():
-                    st.warning("Algunos lotes CP propuestos quedan por debajo del mínimo indicado. El plan es preliminar: agrupe lotes y valide factibilidad.")
-                if int(plan["Maquila pendiente al cierre"].iloc[-1])>0:
-                    st.warning("El escenario deja pedidos de maquila pendientes. Es necesario redistribuir capacidad o ajustar fechas.")
-                st.download_button("Descargar plan preliminar (CSV)",data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
-                                   file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv",mime="text/csv")
-            except Exception as e:
-                plan=None
-                st.error("No fue posible calcular el escenario de reposición: "+str(e))
             buffer=BytesIO()
             try:
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:
                     show.to_excel(writer,sheet_name="PRONOSTICO",index=False)
+                    zero_trace.to_excel(writer,sheet_name="CEROS_CONFIRMADOS",index=False)
+                    if protocols:
+                        pd.concat([p['validation'].assign(Serie=n) for n,p in protocols.items()]).to_excel(writer,sheet_name="VALIDACION_12",index=False)
+                        pd.concat([evaluate_protocol(p).assign(Serie=n) for n,p in protocols.items()]).to_excel(writer,sheet_name="PRUEBA_12",index=False)
+                        pd.DataFrame([{'Serie':n,'Modelo':p['selected'],'Epocas':p['candidates'][p['selected']].epochs,
+                                       'Smearing':p['candidates'][p['selected']].smear,'Criterio':'RMSE a 12 semanas',
+                                       'Refit':'Todo el historial, después de prueba'} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
                     if plan is not None:
                         plan.to_excel(writer,sheet_name="PLAN_REPOSICION",index=False)
                     if plan is not None:
@@ -345,14 +361,14 @@ with t4:
                         result,m=evaluate_demand_test(fits["Demanda de corte propio"],selection,12)
                         metric_rows.append({"Serie":"Demanda de corte propio","Etapa":"Prueba recursiva método elegido: "+selection.method,**m})
                         selection.comparison.to_excel(writer,sheet_name="COMPARACION_CP",index=False)
-                    pd.DataFrame(metric_rows).to_excel(writer,sheet_name="METRICAS",index=False)
+                    pd.DataFrame(metric_rows).assign(Alcance="Diagnóstico motor anterior; selección final en PRUEBA_12").to_excel(writer,sheet_name="METRICAS",index=False)
                     pd.concat(val_tables,ignore_index=True).to_excel(writer,sheet_name="VALIDACION",index=False)
                     pd.concat(test_tables,ignore_index=True).to_excel(writer,sheet_name="PRUEBA",index=False)
                     meta=pd.DataFrame([("Archivo",file.name),("SHA256",sha256(payload).hexdigest()),
                         ("Origen declarado",", ".join(info["fuentes_declaradas"]) if info["fuentes_declaradas"] else "No declarado"),
                         ("Fin de historial",str(info["fecha_ultima_semana"])),
-                        ("Modelo demanda MQ","LSTM validada"),
-                        ("Modelo demanda CP",selection.method if selection else "LSTM"),
+                        ("Modelo demanda MQ",protocols["Demanda de maquila"]["selected"] if protocols else "LSTM validada"),
+                        ("Modelo demanda CP",protocols["Demanda de corte propio"]["selected"] if protocols else (selection.method if selection else "LSTM")),
                         ("Ventana",settings.lookback),("Épocas máximas",settings.epochs),("Unidades LSTM",settings.units),
                         ("Semilla",settings.seed),("Entrenamiento",train),("Validación",val),
                         ("Horizonte",int(weeks)),("Inicio plan",str(start)),

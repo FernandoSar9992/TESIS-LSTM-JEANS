@@ -27,8 +27,6 @@ def predict_one(history,method,alpha):
     if method=="SBA":
         gaps=np.diff(np.r_[-1,positive])
         interval=float(gaps[0])
-        for v,gap in zip(y[positive[1:]],gaps[1:]):
-            pass
         # Iterate event positions, updating size and interarrival interval.
         for i,pos in enumerate(positive[1:],start=1):
             z=alpha*float(y[pos])+(1-alpha)*z

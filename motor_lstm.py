@@ -63,8 +63,9 @@ def prepare_base(raw: pd.DataFrame, today: date | None = None) -> tuple[pd.DataF
     """Prepara la base tal cual se cargó; no rellena objetivos ni edita valores.
 
     Excluye semanas cuyo FIN sea posterior a la fecha actual de Ecuador, ya que
-    todavía no representan semanas cerradas. El corte propio empieza donde existe
-    su primera demanda; ceros previos de producción no se interpretan como pedidos.
+    todavía no representan semanas cerradas. extract_series delimita producción
+    desde su primer positivo. La demanda desconocida no se convierte en cero;
+    una declaración explícita de ausencia de ventas se registra por separado.
     """
     if today is None:
         today = datetime.now(APP_TIMEZONE).date()

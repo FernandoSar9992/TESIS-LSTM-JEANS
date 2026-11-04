@@ -203,6 +203,32 @@ def select(series, production=False, settings=None):
             'settings': settings, 'smear': smear, 'test': None}
 
 
+def demand_from_fit(fit):
+    """Preserva el entrenamiento de demanda previo a la corrección de producción.
+
+    VALIDACIÓN ya eligió épocas: sus métricas son de desarrollo, no una
+    estimación independiente. TEST sigue separado y no decide la restauración.
+    """
+    if not fit.name.startswith('Demanda'):
+        raise ValueError('Adaptador exclusivo de demanda')
+    y = fit.series.valor.to_numpy(float)
+    tr, ve = int(fit.idx_val[0]), int(fit.idx_test[0])
+    origins(tr, ve); origins(ve, len(y))
+    name = 'LSTM demanda original'
+    c = Candidate('log', fit.model, fit.mean, fit.std, fit.settings.lookback,
+                  fit.best_epoch, settings=fit.settings)
+    candidates = {name: c}
+    for method in ('Persistencia', 'Media móvil 4', 'Media móvil 8', 'Media histórica'):
+        candidates[method] = Candidate(method, None, 0, 1, 0, 0)
+    table, detail = compare(candidates, y, tr, ve, y[:tr])
+    table = table.sort_values(['RMSE','MAE','Modelo'],kind='stable').reset_index(drop=True)
+    return {'selected': name, 'best_comparison': str(table.iloc[0].Modelo),
+            'selection_policy': 'Restauración del motor de demanda; no selección por prueba',
+            'candidates': candidates, 'validation': table, 'validation_predictions': detail,
+            'train_end': tr, 'validation_end': ve, 'series': fit.series.copy(),
+            'settings': fit.settings, 'smear': 1., 'test': None, 'original_demand_fit': fit}
+
+
 def evaluate(selection):
     if selection['test'] is None:
         y = selection['series'].valor.to_numpy(float)
@@ -225,6 +251,14 @@ def future(selection, first_plan, weeks=12, refit=True):
     c = selection['candidates'][selection['selected']]
     if c.model is None:
         raise ValueError('El pronóstico principal debe ser LSTM; las referencias son solo comparación.')
+    if 'original_demand_fit' in selection:
+        from motor_lstm import full_refit_forecast
+        from pronostico_horizonte import forecast_lstm_verified
+        fit = selection['original_demand_fit']
+        forecast_fn = full_refit_forecast if refit else forecast_lstm_verified
+        result = forecast_fn(fit, first_plan.date(), weeks).rename(columns={fit.target: 'pronostico'})
+        result['fecha_inicio'] = pd.to_datetime(result['fecha_inicio'])
+        return result
     if refit and c.model is not None:
         # New object: evaluation network, scaling and metrics remain untouched.
         c = replace(train_candidate(y, c.kind, c.settings, c.epochs), smear=c.smear)

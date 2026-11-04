@@ -22,12 +22,12 @@ from planificacion_reposicion import calcular_plan_reposicion
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
 from protocolo_final import (confirm_pre_sales, select as select_protocol,
-                             evaluate as evaluate_protocol, future as future_protocol)
+                             evaluate as evaluate_protocol, future as future_protocol, demand_from_fit)
 
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión LSTM principal v2 · Las referencias se comparan, pero no sustituyen las tres LSTM.")
+st.caption("Versión v3 · Motor original de demandas restaurado · Producción CP evaluada por separado.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -68,7 +68,7 @@ try:
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-signature=sha256(b'lstm-principal-v2'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
+signature=sha256(b'lstm-demandas-restauradas-v3'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -115,7 +115,8 @@ with t1:
             if optional:
                 st.session_state["cp_choice"]=select_by_validation(fitted["Producción de corte propio"])
             with st.spinner("Comparando candidatos a 12 semanas con validación temporal separada"):
-                st.session_state["protocols"]={name:select_protocol(frame,name=="Producción de corte propio",settings)
+                st.session_state["protocols"]={name:(demand_from_fit(fitted[name]) if name.startswith("Demanda")
+                                               else select_protocol(frame,True,settings))
                                                for name,frame in series.items()}
             st.success("Entrenamiento y validación completados.")
         except ImportError as e:
@@ -136,7 +137,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Selección LSTM a 12 semanas y comparación con referencias")
-            st.caption("El pronóstico principal siempre es LSTM. Entre variantes LSTM se elige por RMSE de validación y MAE como desempate. Las referencias se muestran aunque tengan menor error. Orígenes solapados; épocas y calibración determinadas dentro de entrenamiento.")
+            st.caption("Demandas: se conserva el entrenamiento original, con épocas elegidas en validación; sus métricas de validación son de desarrollo. Producción: variantes elegidas por RMSE de validación, con épocas y calibración internas. Referencias solo para comparación. Orígenes solapados.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if protocol.get('best_comparison')!=protocol['selected']:
@@ -258,9 +259,16 @@ with t4:
     else:
         st.subheader("Pronóstico para planificación agregada y PMP")
         selection=st.session_state.get("demand_choice")
+        refit_demands=st.checkbox("Reentrenar demandas con todo el historial después de la prueba",value=False,
+            help="Desactivado conserva pesos y escala del motor original. Activado usa un modelo nuevo con las épocas elegidas en validación; puede cambiar el pronóstico, sin alterar las métricas de prueba.")
+        if st.session_state.get('refit_demands')!=refit_demands:
+            st.session_state['refit_demands']=refit_demands
+            st.session_state.pop('forecast',None)
+            st.session_state.pop('plan_preliminar',None)
         if protocols:
             for name,protocol in protocols.items():
-                st.caption(name+": "+protocol['selected']+". Reajuste final con todo el historial y épocas congeladas.")
+                mode=". Reajuste final con todo el historial y épocas congeladas." if (not name.startswith('Demanda') or refit_demands) else ". Pesos y escala originales; recursión sin valores reales futuros."
+                st.caption(name+": "+protocol['selected']+mode)
         elif selection:
             st.caption("Demanda CP: "+selection.method+" (elegido en validación del horizonte). Demanda MQ: LSTM.")
         cp_choice=st.session_state.get("cp_choice")
@@ -273,7 +281,8 @@ with t4:
                 forecasts={}
                 for name,fit in fits.items():
                     if protocols:
-                        forecasts[name]=future_protocol(protocols[name],start,int(weeks)).rename(columns={'pronostico':fit.target})
+                        forecasts[name]=future_protocol(protocols[name],start,int(weeks),
+                            refit=(refit_demands if name.startswith('Demanda') else True)).rename(columns={'pronostico':fit.target})
                     elif name=="Demanda de corte propio" and selection:
                         forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
                     elif name=="Producción de corte propio" and st.session_state.get("cp_choice") is not None and st.session_state["cp_choice"].method!="LSTM original":

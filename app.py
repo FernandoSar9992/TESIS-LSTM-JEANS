@@ -3,7 +3,7 @@ La producción propia es análisis opcional. Datos originales inalterados.
 """
 from __future__ import annotations
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timedelta
 from hashlib import sha256
 from io import BytesIO
 import hmac
@@ -39,14 +39,18 @@ if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="pa
 with st.sidebar:
     st.header("Configuración")
     weeks=st.number_input("Semanas del pronóstico",min_value=1,max_value=26,value=12,step=1)
-    start=st.date_input("Inicio del plan (lunes)",value=date(2026,11,2))
+    today_local=datetime.now(APP_TIMEZONE).date()
+    days_to_monday=(7-today_local.weekday())%7
+    default_start=today_local+timedelta(days=days_to_monday or 7)
+    start=st.date_input("Inicio del plan (lunes)",value=default_start,
+                        min_value=default_start,help="Se propone automáticamente el próximo lunes para evitar fechas de planificación vencidas.")
     st.caption("Ajustes de entrenamiento")
     look=st.number_input("Ventana histórica",min_value=4,max_value=24,value=12)
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
-    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=True,
-                         help="Activado por defecto. La producción histórica refleja decisiones de inventario; no equivale al programa de fabricación.")
+    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=False,
+                         help="No es necesario para pronosticar las dos demandas ni para calcular la reposición. Actívalo solo si deseas analizar la producción histórica como serie independiente.")
     with st.expander("Detalles de evaluación",expanded=False):
         train=st.slider("Entrenamiento (%)",60,80,70,5)
         val=st.slider("Validación (%)",10,20,15,5)
@@ -368,8 +372,8 @@ with t4:
                     capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10,disabled=resources is not None)
                     te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01,disabled=resources is not None)
                     te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01,disabled=resources is not None)
-                    cp_share=st.slider("Máximo de capacidad reservable para CP (%)",0,100,35,5,
-                        help="Cuota máxima orientativa. Si CP requiere capacidad, MQ puede quedar pendiente.")
+                    cp_share=st.slider("Prioridad de capacidad para CP (%)",0,100,35,5,
+                        help="Porcentaje de capacidad CP que se prioriza antes de asignar MQ; CP también puede utilizar la holgura posterior.")
             st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
             st.caption("La reposición supone ingreso a bodega una semana después de confección y lavado. Cobertura, cuota CP y lote mínimo son políticas editables, no capacidades medidas.")
             plan=None
@@ -391,7 +395,7 @@ with t4:
                 left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
                 right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
                 third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una cuota CP mayor puede desplazar maquila; los lotes mínimos solo se señalan.")
+                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una prioridad CP mayor puede desplazar maquila cuando los recursos están saturados; CP puede aprovechar holguras posteriores. Los lotes mínimos solo se señalan.")
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")

@@ -10,7 +10,10 @@ import pandas as pd
 def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
                             capacidad_equiv_mq=420, te_mq=22.04, te_cp=35.16,
                             semanas_cobertura=4, reserva_capacidad_cp_pct=0,
-                            minimo_lote_cp=0):
+                            minimo_lote_cp=0, recursos=None):
+    if recursos is not None:
+        from capacidad_recursos import validate, maximum
+        recursos=validate(recursos)
     for name,x in (("inventario",inventario_inicial),("lavado pendiente",lavado_pendiente),
                    ("capacidad",capacidad_equiv_mq),("TE MQ",te_mq),
                    ("TE CP",te_cp),("lote mínimo",minimo_lote_cp)):
@@ -53,7 +56,14 @@ def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
         need=max(0,target-stock)
         mq_need=int(mq[i])+backlog
         cp_capacity_total=int(math.floor((cap+1e-9)/ratio))
-        if reserved<=0:
+        if recursos is not None:
+            if reserved<=0:
+                prod_mq=min(mq_need,maximum(recursos,'mq'))
+                prod_cp=min(need,maximum(recursos,'cp',prod_mq))
+            else:
+                prod_cp=min(need,int(math.floor(maximum(recursos,'cp')*reserved)))
+                prod_mq=min(mq_need,maximum(recursos,'mq',prod_cp))
+        elif reserved<=0:
             prod_mq=min(mq_need,int(math.floor(cap+1e-9)))
             available=cap-prod_mq
             prod_cp=min(need,cp_capacity_total,int(math.floor((available+1e-9)/ratio)))
@@ -63,7 +73,7 @@ def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
             prod_mq=min(mq_need,int(math.floor(cap-ratio*prod_cp+1e-9)))
         backlog=mq_need-prod_mq
         used=prod_mq+ratio*prod_cp
-        if used>cap+1e-7:
+        if recursos is None and used>cap+1e-7:
             raise ArithmeticError("Exceso de capacidad equivalente")
         result.append({
             "Semana desde":when.date(),
@@ -83,5 +93,14 @@ def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
             "Holgura (equiv. MQ)":round(max(0.0,cap-used),2),
             "Lote CP bajo mínimo":bool(0<prod_cp<int(minimo_lote_cp)),
         })
+        if recursos is not None:
+            load=prod_mq*recursos.te_mq_s+prod_cp*recursos.te_cp_s
+            if (load>recursos.segundos_disponibles+1e-7).any():
+                raise ArithmeticError('Exceso de capacidad por recurso')
+            utilization=load/recursos.segundos_disponibles
+            row=result[-1]
+            row.pop('Carga utilizada (equiv. MQ)'); row.pop('Holgura (equiv. MQ)')
+            row['Utilización máxima de recurso (%)']=100*float(utilization.max())
+            row['Recurso más utilizado']=recursos.loc[utilization.idxmax(),'recurso']
         arrival=prod_cp
     return pd.DataFrame(result)

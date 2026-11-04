@@ -18,7 +18,10 @@ def check(app, stage):
     print('OK',stage,flush=True)
 
 upload=BytesIO(Path(sys.argv[1]).read_bytes());upload.name='04_BASE_DE_DATOS.xlsx'
-with patch('streamlit.file_uploader', return_value=upload):
+capacity_upload=BytesIO(Path(sys.argv[3]).read_bytes()) if len(sys.argv)>3 else None
+def uploader(label,*args,**kwargs):
+    return capacity_upload if kwargs.get('key')=='capacity_file' else upload
+with patch('streamlit.file_uploader', side_effect=uploader):
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=600).run()
     check(app,'carga real')
     next(c for c in app.checkbox if c.label.startswith('Confirmo')).check().run()
@@ -27,7 +30,7 @@ with patch('streamlit.file_uploader', return_value=upload):
     protocols=app.session_state['protocols']
     assert all(p['candidates'][p['selected']].model is not None for p in protocols.values())
     for n,p in protocols.items():
-        if n.startswith('Demanda'):
+        if n.startswith('Demanda') and p['selected']=='LSTM demanda original':
             assert p['candidates'][p['selected']].model is app.session_state['fits'][n].model
     next(b for b in app.button if b.label=='Evaluar PRUEBA').click().run()
     check(app,'prueba')
@@ -46,7 +49,7 @@ with patch('streamlit.file_uploader', return_value=upload):
         forecast.to_csv(out/'pronostico_12_semanas.csv',index=False)
         for n,p in protocols.items():
             fit=app.session_state['fits'][n]
-            if n.startswith('Demanda'):
+            if n.startswith('Demanda') and p['selected']=='LSTM demanda original':
                 expected=forecast_lstm_verified(fit,date(2026,11,2),12)
                 import numpy as np
                 np.testing.assert_allclose(forecast[fit.target],expected[fit.target],rtol=1e-7)
@@ -56,6 +59,16 @@ with patch('streamlit.file_uploader', return_value=upload):
             'epocas':p['candidates'][p['selected']].epochs} for n,p in protocols.items()},indent=2),encoding='utf-8')
     next(b for b in app.button if b.label=='Calcular plan preliminar').click().run()
     check(app,'plan y exportacion Excel')
+    if capacity_upload is not None:
+        from capacidad_recursos import read_capacity,loads
+        resources,_=read_capacity(capacity_upload.getvalue())
+        plan=app.session_state['plan_preliminar']
+        assert plan['Inventario CP al inicio'].iloc[0]==698
+        audit=loads(plan,resources)
+        assert (audit.carga_segundos<=audit.segundos_disponibles+1e-7).all()
+        if len(sys.argv)>2:
+            plan.to_csv(out/'plan_recursos.csv',index=False)
+            audit.to_csv(out/'carga_recursos.csv',index=False)
     assert len(app.session_state['forecast'])==12
     assert len(app.session_state['plan_preliminar'])==12
     print('STREAMLIT COMPLETO',flush=True)

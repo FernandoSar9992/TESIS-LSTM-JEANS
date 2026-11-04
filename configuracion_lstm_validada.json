@@ -1,0 +1,55 @@
+{
+  "source_sha256": "137bbc645825b7dce2acc810d06c632a1bf7807946638c762a888f39ae9d10ef",
+  "test_previously_observed": true,
+  "selection": "validation RMSE 12 weeks",
+  "models": {
+    "Demanda de maquila": {
+      "selected": "H12 LSTM log w12 u16 e30",
+      "epochs": 30,
+      "kind": "log",
+      "settings": {
+        "lookback": 12,
+        "epochs": 100,
+        "units": 16,
+        "batch_size": 16,
+        "patience": 12,
+        "train_ratio": 0.7,
+        "val_ratio": 0.15,
+        "seed": 42,
+        "dropout": 0.15
+      }
+    },
+    "Demanda de corte propio": {
+      "selected": "H12 LSTM log w12 u16 e100",
+      "epochs": 100,
+      "kind": "log",
+      "settings": {
+        "lookback": 12,
+        "epochs": 100,
+        "units": 16,
+        "batch_size": 16,
+        "patience": 12,
+        "train_ratio": 0.7,
+        "val_ratio": 0.15,
+        "seed": 42,
+        "dropout": 0.15
+      }
+    },
+    "Producci\u00f3n de corte propio": {
+      "selected": "H12 LSTM hurdle w12 u16 e100",
+      "epochs": 100,
+      "kind": "hurdle",
+      "settings": {
+        "lookback": 12,
+        "epochs": 100,
+        "units": 16,
+        "batch_size": 16,
+        "patience": 12,
+        "train_ratio": 0.7,
+        "val_ratio": 0.15,
+        "seed": 42,
+        "dropout": 0.15
+      }
+    }
+  }
+}

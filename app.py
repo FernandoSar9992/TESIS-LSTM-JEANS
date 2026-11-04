@@ -10,6 +10,8 @@ import hmac
 import os
 import sys
 import importlib.util
+import json
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -19,6 +21,8 @@ from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,extract_series,fit_on
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
                                   forecast_lstm_verified,forecast_demand_selected)
 from planificacion_reposicion import calcular_plan_reposicion
+from capacidad_recursos import read_capacity, loads as resource_loads
+from lstm_validacion_horizonte import select_frozen, future_search
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
 from protocolo_final import (confirm_pre_sales, select as select_protocol,
@@ -27,7 +31,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v3 · Motor original de demandas restaurado · Producción CP evaluada por separado.")
+st.caption("Versión v4 · LSTM evaluadas a 12 semanas · Capacidad compartida por recurso.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -68,7 +72,16 @@ try:
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-signature=sha256(b'lstm-demandas-restauradas-v3'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
+config_path=Path(__file__).with_name('configuracion_lstm_validada.json')
+validated_config=json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+profile_available=(validated_config.get('source_sha256')==sha256(payload).hexdigest()
+                   and confirm_zeros and settings==Settings())
+use_validated=st.checkbox('Usar configuración LSTM elegida por validación de 12 semanas',
+    value=profile_available,disabled=not profile_available,
+    help='Disponible para la base auditada, con ceros iniciales confirmados y ajustes manuales por defecto. No garantiza alta precisión en las tres series.')
+if use_validated:
+    st.caption('Configuración congelada: 16 unidades; épocas elegidas por serie. No se repite la búsqueda en la app. El bloque de prueba ya fue observado en revisiones anteriores.')
+signature=sha256(b'lstm-horizonte-v4'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -118,6 +131,9 @@ with t1:
                 st.session_state["protocols"]={name:(demand_from_fit(fitted[name]) if name.startswith("Demanda")
                                                else select_protocol(frame,True,settings))
                                                for name,frame in series.items()}
+                if use_validated:
+                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p)
+                                                  for name,p in st.session_state['protocols'].items()}
             st.success("Entrenamiento y validación completados.")
         except ImportError as e:
             st.session_state.pop("fits",None)
@@ -137,7 +153,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Selección LSTM a 12 semanas y comparación con referencias")
-            st.caption("Demandas: se conserva el entrenamiento original, con épocas elegidas en validación; sus métricas de validación son de desarrollo. Producción: variantes elegidas por RMSE de validación, con épocas y calibración internas. Referencias solo para comparación. Orígenes solapados.")
+            st.caption("La configuración de 12 semanas, cuando está activada, elige arquitectura y épocas por RMSE recursivo de validación. Las métricas de validación son de desarrollo y los orígenes se solapan. Al desactivarla se conserva el motor v3. Las referencias no sustituyen la LSTM.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if protocol.get('best_comparison')!=protocol['selected']:
@@ -281,7 +297,7 @@ with t4:
                 forecasts={}
                 for name,fit in fits.items():
                     if protocols:
-                        forecasts[name]=future_protocol(protocols[name],start,int(weeks),
+                        forecasts[name]=future_search(protocols[name],start,int(weeks),
                             refit=(refit_demands if name.startswith('Demanda') else True)).rename(columns={'pronostico':fit.target})
                     elif name=="Demanda de corte propio" and selection:
                         forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
@@ -307,7 +323,11 @@ with t4:
                 "produccion_cp":"Producción CP histórica estimada","produccion_total_referencia":"Producción total de referencia"})
             numeric=list(show.columns)[2:]
             show[numeric]=show[numeric].round(2)
-            st.caption("Pronósticos como cantidades esperadas, con dos decimales. El plan de fabricación realiza su propio redondeo a unidades enteras.")
+            st.caption("Pronósticos puntuales, con dos decimales. El plan de fabricación realiza su propio redondeo a unidades enteras.")
+            if protocols:
+                weak=[n for n,p in protocols.items() if (p['test'].loc[p['test'].Modelo==p['selected'],'R²']<0).any()]
+                if weak:
+                    st.warning('Precisión limitada en prueba: '+', '.join(weak)+'. Evalúa escenarios de demanda antes de comprometer fabricación; generar el pronóstico no certifica su precisión.')
             st.dataframe(show,hide_index=True,use_container_width=True)
             fig=go.Figure()
             for field,label in [("demanda_mq","Maquila"),("demanda_cp","Corte propio"),("demanda_total","Demanda total")]:
@@ -319,32 +339,50 @@ with t4:
             st.divider()
             st.subheader("Plan preliminar de reposición de corte propio")
             st.write("Diferente del pronóstico estadístico: calcula cantidades propuestas a partir de demanda, inventario y capacidad compartida.")
+            capacity_file=st.file_uploader("Cargar 03_CAPACIDADES.xlsx para restricciones por recurso",type=['xlsx'],key='capacity_file')
+            resources=None
+            capacity_digest=None
+            if capacity_file is not None:
+                try:
+                    capacity_payload=capacity_file.getvalue()
+                    resources,capacity_checks=read_capacity(capacity_payload)
+                    capacity_digest=sha256(capacity_payload).hexdigest()
+                    if not capacity_checks.coincide.all():
+                        st.warning("Hay diferencias entre capacidades guardadas y horas/tiempos. Se usan horas y tiempos; revisa la auditoría.")
+                    st.caption("Capacidad compartida por máquina y trabajador del Excel; las capacidades de ambas modalidades no se suman.")
+                    with st.expander('Auditoría de capacidad del Excel'):
+                        st.dataframe(capacity_checks,hide_index=True)
+                except Exception as e:
+                    st.error('No se pudo validar capacidad: '+str(e)); st.stop()
             with st.expander("Supuestos de reposición y capacidad",expanded=True):
                 left,right=st.columns(2)
                 with left:
-                    stock=st.number_input("Inventario CP disponible al inicio (unidades)",min_value=0,value=0,step=10,
-                        help="Coloca inventario físico verificado, no inventario sintético.")
+                    recorded_stock=base['inventario_final_cp'].iloc[-1] if 'inventario_final_cp' in base else None
+                    stock_default=int(recorded_stock) if recorded_stock is not None and pd.notna(recorded_stock) and recorded_stock>=0 else None
+                    stock=st.number_input("Inventario CP disponible al inicio (unidades)",min_value=0,value=stock_default,step=1,
+                        help="Inicializado con el inventario final registrado en el Excel. Ajusta si el inventario físico disponible difiere.")
                     wash=st.number_input("CP ya confeccionados, aún en lavado (recibir la primera semana)",min_value=0,value=0,step=10)
                     cover=st.slider("Cobertura objetivo CP (semanas)",1,8,4)
                     minlot=st.number_input("Lote CP mínimo orientativo",min_value=0,value=80,step=10)
                 with right:
-                    capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10)
-                    te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01)
-                    te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01)
+                    capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10,disabled=resources is not None)
+                    te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01,disabled=resources is not None)
+                    te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01,disabled=resources is not None)
                     cp_share=st.slider("Máximo de capacidad reservable para CP (%)",0,100,35,5,
                         help="Cuota máxima orientativa. Si CP requiere capacidad, MQ puede quedar pendiente.")
             st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
+            st.caption("La reposición supone ingreso a bodega una semana después de confección y lavado. Cobertura, cuota CP y lote mínimo son políticas editables, no capacidades medidas.")
             plan=None
             if st.button("Calcular plan preliminar",type="secondary",use_container_width=True):
                 try:
                     plan=calcular_plan_reposicion(
-                        forecast,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+                        forecast,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,recursos=resources)
                     st.session_state["plan_preliminar"]=plan
                     st.session_state["plan_signature"]=(st.session_state.get("signature"),forecast_key,
-                        stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+                        stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,capacity_digest)
                 except Exception as exc:
                     st.error("No se pudo calcular el plan: "+str(exc))
-            keys=(st.session_state.get("signature"),forecast_key,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot)
+            keys=(st.session_state.get("signature"),forecast_key,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,capacity_digest)
             if st.session_state.get("plan_signature")==keys:
                 plan=st.session_state.get("plan_preliminar")
             if plan is not None:
@@ -353,7 +391,7 @@ with t4:
                 left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
                 right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
                 third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.caption("Este escenario no incorpora precedencias ni restricciones de cada máquina. Una cuota CP mayor puede desplazar maquila. Los lotes mínimos solo se señalan: no se fuerzan ni se inventan capacidades.")
+                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una cuota CP mayor puede desplazar maquila; los lotes mínimos solo se señalan.")
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")
@@ -367,9 +405,12 @@ with t4:
                         pd.concat([evaluate_protocol(p).assign(Serie=n) for n,p in protocols.items()]).to_excel(writer,sheet_name="PRUEBA_12",index=False)
                         pd.DataFrame([{'Serie':n,'Modelo':p['selected'],'Epocas':p['candidates'][p['selected']].epochs,
                                        'Smearing':p['candidates'][p['selected']].smear,'Criterio':'RMSE a 12 semanas',
-                                       'Refit':'Todo el historial, después de prueba'} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
+                                       'Refit':('Todo el historial, después de prueba' if not n.startswith('Demanda') or refit_demands else 'Sin reajuste; pesos y escala evaluados')} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
                     if plan is not None:
                         plan.to_excel(writer,sheet_name="PLAN_REPOSICION",index=False)
+                        if resources is not None:
+                            resources.to_excel(writer,sheet_name='RECURSOS_CAPACIDAD',index=False)
+                            resource_loads(plan,resources).to_excel(writer,sheet_name='CARGA_RECURSOS',index=False)
                     if plan is not None:
                         plan.to_excel(writer,sheet_name="PLAN_PRELIMINAR",index=False)
                     metric_rows=[]

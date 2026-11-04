@@ -3,7 +3,7 @@ La producción propia es análisis opcional. Datos originales inalterados.
 """
 from __future__ import annotations
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime, timedelta
 from hashlib import sha256
 from io import BytesIO
 import hmac
@@ -39,14 +39,18 @@ if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="pa
 with st.sidebar:
     st.header("Configuración")
     weeks=st.number_input("Semanas del pronóstico",min_value=1,max_value=26,value=12,step=1)
-    start=st.date_input("Inicio del plan (lunes)",value=date(2026,11,2))
+    today_local=datetime.now(APP_TIMEZONE).date()
+    days_to_monday=(7-today_local.weekday())%7
+    default_start=today_local+timedelta(days=days_to_monday or 7)
+    start=st.date_input("Inicio del plan (lunes)",value=default_start,
+                        min_value=default_start,help="Se propone automáticamente el próximo lunes para evitar fechas de planificación vencidas.")
     st.caption("Ajustes de entrenamiento")
     look=st.number_input("Ventana histórica",min_value=4,max_value=24,value=12)
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
-    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=True,
-                         help="Activado por defecto. La producción histórica refleja decisiones de inventario; no equivale al programa de fabricación.")
+    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=False,
+                         help="No es necesario para pronosticar las dos demandas ni para calcular la reposición. Actívalo solo si deseas analizar la producción histórica como serie independiente.")
     with st.expander("Detalles de evaluación",expanded=False):
         train=st.slider("Entrenamiento (%)",60,80,70,5)
         val=st.slider("Validación (%)",10,20,15,5)
@@ -58,13 +62,32 @@ file=st.file_uploader("Cargar 04_BASE_DE_DATOS.xlsx",type=["xlsx","xlsm"])
 if file is None:
     st.info("Carga el archivo con la hoja DEMANDA para iniciar."); st.stop()
 payload=file.getvalue()
+source_digest=sha256(payload).hexdigest()
+config_path=Path(__file__).with_name('configuracion_lstm_validada.json')
+validated_config=json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
 try:
     xl=pd.ExcelFile(BytesIO(payload))
     if "DEMANDA" not in xl.sheet_names:
         raise ValueError("No existe la hoja DEMANDA en el archivo.")
     base,info=prepare_base(pd.read_excel(BytesIO(payload),sheet_name="DEMANDA"))
-    confirm_zeros=st.checkbox("Confirmo que no hubo ventas CP entre la primera producción y el primer registro de demanda",
-                             value=False, help="Solo completa el tramo inicial activo; conserva el Excel original y registra la declaración.")
+
+    # Confirmación previa del usuario, registrada el 03-11-2026.
+    # Solo se preselecciona para el hash auditado y el tramo exacto de cinco semanas.
+    first_prod=np.flatnonzero(base["produccion_cp"].fillna(0).to_numpy(float)>0)
+    first_demand=np.flatnonzero(base["demanda_cp"].notna().to_numpy())
+    auto_confirm_zeros=False
+    if (source_digest==validated_config.get("source_sha256")
+            and len(first_prod)>0 and len(first_demand)>0):
+        a,b=int(first_prod[0]),int(first_demand[0])
+        gap=base["demanda_cp"].iloc[a:b]
+        auto_confirm_zeros=(b-a==5 and gap.isna().all()
+                            and base["demanda_cp"].iloc[:a].isna().all()
+                            and base["demanda_cp"].iloc[b:].notna().all())
+    confirm_zeros=st.checkbox(
+        "Confirmación previa: no hubo ventas CP en las 5 semanas entre la primera producción y el primer registro",
+        value=auto_confirm_zeros,
+        help="Se preselecciona únicamente para el archivo exacto ya auditado y confirmado. Completa solo esas cinco semanas; no convierte en ceros las semanas anteriores al inicio de corte propio."
+    )
     base,zero_trace=confirm_pre_sales(base,confirm_zeros)
     names={"Demanda de maquila":"demanda_mq","Demanda de corte propio":"demanda_cp"}
     if optional: names["Producción de corte propio"]="produccion_cp"
@@ -72,9 +95,7 @@ try:
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-config_path=Path(__file__).with_name('configuracion_lstm_validada.json')
-validated_config=json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
-profile_available=(validated_config.get('source_sha256')==sha256(payload).hexdigest()
+profile_available=(validated_config.get('source_sha256')==source_digest
                    and confirm_zeros and settings==Settings())
 use_validated=st.checkbox('Usar configuración LSTM elegida por validación de 12 semanas',
     value=profile_available,disabled=not profile_available,
@@ -110,7 +131,7 @@ with st.expander("Datos y trazabilidad"):
 t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
 with t1:
     st.subheader("Entrenar LSTM de demanda y producción")
-    st.write("Se entrenan las dos demandas y, por defecto, producción CP. Cada serie tiene su propia LSTM y el escalado se ajusta solo con entrenamiento.")
+    st.write("Se entrenan las dos demandas. La producción histórica CP es un análisis complementario opcional y permanece desactivada para agilizar el pronóstico de demanda. Cada serie usa su propia LSTM y el escalado se ajusta solo con entrenamiento.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
         for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
             st.session_state.pop(k,None)
@@ -275,8 +296,8 @@ with t4:
     else:
         st.subheader("Pronóstico para planificación agregada y PMP")
         selection=st.session_state.get("demand_choice")
-        refit_demands=st.checkbox("Reentrenar demandas con todo el historial después de la prueba",value=False,
-            help="Desactivado conserva pesos y escala del motor original. Activado usa un modelo nuevo con las épocas elegidas en validación; puede cambiar el pronóstico, sin alterar las métricas de prueba.")
+        refit_demands=st.checkbox("Reentrenar las demandas con todo el historial después de evaluar la prueba",value=True,
+            help="Recomendado para el pronóstico operativo: conserva arquitectura y épocas elegidas en validación, reajusta con todas las semanas disponibles y no modifica las métricas de prueba ya calculadas.")
         if st.session_state.get('refit_demands')!=refit_demands:
             st.session_state['refit_demands']=refit_demands
             st.session_state.pop('forecast',None)
@@ -368,8 +389,8 @@ with t4:
                     capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10,disabled=resources is not None)
                     te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01,disabled=resources is not None)
                     te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01,disabled=resources is not None)
-                    cp_share=st.slider("Máximo de capacidad reservable para CP (%)",0,100,35,5,
-                        help="Cuota máxima orientativa. Si CP requiere capacidad, MQ puede quedar pendiente.")
+                    cp_share=st.slider("Prioridad de capacidad para CP (%)",0,100,35,5,
+                        help="Porcentaje de capacidad CP que se prioriza antes de asignar MQ; CP también puede utilizar la holgura posterior.")
             st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
             st.caption("La reposición supone ingreso a bodega una semana después de confección y lavado. Cobertura, cuota CP y lote mínimo son políticas editables, no capacidades medidas.")
             plan=None
@@ -391,7 +412,7 @@ with t4:
                 left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
                 right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
                 third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una cuota CP mayor puede desplazar maquila; los lotes mínimos solo se señalan.")
+                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una prioridad CP mayor puede desplazar maquila cuando los recursos están saturados; CP puede aprovechar holguras posteriores. Los lotes mínimos solo se señalan.")
                 st.download_button("Descargar plan preliminar (CSV)",
                     data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
                     file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")

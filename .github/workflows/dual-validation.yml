@@ -2,9 +2,9 @@ name: Comprobaciones de pronostico dual
 
 on:
   push:
-    branches: [mejora-lstm-maquila-corte]
+    branches: ["**"]
   pull_request:
-    branches: [main]
+    branches: [main, lstm-produccion-final]
 
 jobs:
   calidad:
@@ -24,3 +24,6 @@ jobs:
           python -m unittest discover -s tests -p "test_seasonal_features.py" -v
           python -m unittest discover -s tests -p "test_seasonal_diagnostics.py" -v
           python -m unittest discover -s tests -p "test_validation_audit.py" -v
+          python -m unittest discover -s tests -p "test_capacidad_recursos.py" -v
+          python -m unittest discover -s tests -p "test_capacity_priority_residual.py" -v
+          python -m unittest discover -s tests -p "test_lstm_horizonte.py" -v

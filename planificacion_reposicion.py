@@ -1,6 +1,7 @@
 """Escenario PRELIMINAR de reposición CP: no sustituye PMP ni es LSTM de producción.
 Demanda, inventario inicial, recepción tras lavado y capacidad compartida.
 El TE de ambas modalidades sirve únicamente para estimar carga equivalente.
+La reserva CP es una prioridad: CP puede aprovechar la holgura que quede tras MQ.
 """
 from __future__ import annotations
 import math
@@ -58,19 +59,27 @@ def calcular_plan_reposicion(pronostico, inventario_inicial, lavado_pendiente=0,
         cp_capacity_total=int(math.floor((cap+1e-9)/ratio))
         if recursos is not None:
             if reserved<=0:
+                # Prioridad MQ: CP aprovecha la capacidad que quede libre.
                 prod_mq=min(mq_need,maximum(recursos,'mq'))
                 prod_cp=min(need,maximum(recursos,'cp',prod_mq))
             else:
-                prod_cp=min(need,int(math.floor(maximum(recursos,'cp')*reserved)))
-                prod_mq=min(mq_need,maximum(recursos,'mq',prod_cp))
+                # Primero se reserva una cuota CP; MQ ocupa la capacidad restante.
+                # Después CP puede aprovechar toda holgura compatible con MQ.
+                cp_priority=min(need,int(math.floor(maximum(recursos,'cp')*reserved+1e-9)))
+                prod_mq=min(mq_need,maximum(recursos,'mq',cp_priority))
+                prod_cp=min(need,maximum(recursos,'cp',prod_mq))
         elif reserved<=0:
+            # Prioridad MQ: CP utiliza la holgura real de la capacidad equivalente.
             prod_mq=min(mq_need,int(math.floor(cap+1e-9)))
-            available=cap-prod_mq
-            prod_cp=min(need,cp_capacity_total,int(math.floor((available+1e-9)/ratio)))
+            prod_cp=min(need,cp_capacity_total,
+                        int(math.floor((cap-prod_mq+1e-9)/ratio)))
         else:
-            cp_quota=int(math.floor((cap*reserved+1e-9)/ratio))
-            prod_cp=min(need,cp_capacity_total,cp_quota)
-            prod_mq=min(mq_need,int(math.floor(cap-ratio*prod_cp+1e-9)))
+            # La reserva CP es una prioridad, no un límite máximo rígido.
+            cp_priority=min(need,cp_capacity_total,
+                            int(math.floor((cap*reserved+1e-9)/ratio)))
+            prod_mq=min(mq_need,int(math.floor(cap-ratio*cp_priority+1e-9)))
+            prod_cp=min(need,cp_capacity_total,
+                        int(math.floor((cap-prod_mq+1e-9)/ratio)))
         backlog=mq_need-prod_mq
         used=prod_mq+ratio*prod_cp
         if recursos is None and used>cap+1e-7:

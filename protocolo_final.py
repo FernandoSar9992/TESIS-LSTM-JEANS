@@ -165,6 +165,16 @@ def compare(candidates, y, start, end, train_reference, horizon=12):
     return pd.DataFrame(rows), pd.DataFrame(details)
 
 
+def choose_lstm(validation, candidates):
+    """Restricción de tesis: referencias se comparan, nunca sustituyen la LSTM."""
+    eligible=[name for name,c in candidates.items() if c.model is not None]
+    ranked=validation.loc[validation.Modelo.isin(eligible)].sort_values(
+        ['RMSE','MAE','Modelo'],kind='stable')
+    if ranked.empty:
+        raise ValueError('No hay una LSTM elegible para el pronóstico principal.')
+    return str(ranked.iloc[0].Modelo)
+
+
 def select(series, production=False, settings=None):
     settings = settings or Settings()
     y = series.valor.to_numpy(float)
@@ -185,7 +195,9 @@ def select(series, production=False, settings=None):
         candidates[method] = Candidate(method, None, 0, 1, 0, 0)
     table, detail = compare(candidates, y, tr, ve, y[:tr])
     table = table.sort_values(['RMSE', 'MAE', 'Modelo'], kind='stable').reset_index(drop=True)
-    return {'selected': str(table.iloc[0].Modelo), 'candidates': candidates,
+    return {'selected': choose_lstm(table,candidates),
+            'best_comparison':str(table.iloc[0].Modelo),'selection_policy':'LSTM obligatoria',
+            'candidates': candidates,
             'validation': table, 'validation_predictions': detail,
             'train_end': tr, 'validation_end': ve, 'series': series.copy(),
             'settings': settings, 'smear': smear, 'test': None}
@@ -211,6 +223,8 @@ def future(selection, first_plan, weeks=12, refit=True):
         raise ValueError('Fecha u horizonte inválido')
     y = s.valor.to_numpy(float)
     c = selection['candidates'][selection['selected']]
+    if c.model is None:
+        raise ValueError('El pronóstico principal debe ser LSTM; las referencias son solo comparación.')
     if refit and c.model is not None:
         # New object: evaluation network, scaling and metrics remain untouched.
         c = replace(train_candidate(y, c.kind, c.settings, c.epochs), smear=c.smear)

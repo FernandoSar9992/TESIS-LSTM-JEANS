@@ -27,6 +27,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
+st.caption("Versión LSTM principal v2 · Las referencias se comparan, pero no sustituyen las tres LSTM.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -67,7 +68,7 @@ try:
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
 
-signature=sha256(payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
+signature=sha256(b'lstm-principal-v2'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -134,10 +135,12 @@ with t2:
         st.info("Primero entrena en la pestaña 1.")
     else:
         if protocols:
-            st.subheader("Selección común a 12 semanas")
-            st.caption("RMSE como criterio previo para estimar cantidades medias; MAE como desempate. Orígenes solapados, redes congeladas dentro de la evaluación. La cola interna de entrenamiento elige épocas y calibra Duan; la validación externa elige el método.")
+            st.subheader("Selección LSTM a 12 semanas y comparación con referencias")
+            st.caption("El pronóstico principal siempre es LSTM. Entre variantes LSTM se elige por RMSE de validación y MAE como desempate. Las referencias se muestran aunque tengan menor error. Orígenes solapados; épocas y calibración determinadas dentro de entrenamiento.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
+                if protocol.get('best_comparison')!=protocol['selected']:
+                    st.info("La comparación de validación favorece a "+protocol['best_comparison']+". Se mantiene LSTM por el alcance de la tesis; no se afirma superioridad.")
                 st.dataframe(protocol['validation'].round(3),hide_index=True)
             st.caption("Dos etapas usa probabilidad empírica × media positiva y coincide con media histórica. Las comparaciones anteriores a un paso se conservan debajo como diagnóstico.")
         st.subheader("Diagnóstico del motor anterior: validación de demanda")
@@ -183,14 +186,27 @@ with t3:
         st.subheader("Prueba final con semanas reservadas")
         if st.session_state.get("tests") is None:
             if st.button("Evaluar PRUEBA",type="primary",use_container_width=True):
+                total_steps=len(fits)+len(protocols or {})
+                completed=0
+                evaluation_progress=st.progress(0,text="Preparando evaluación de prueba…")
+                st.info("La evaluación puede tardar varios minutos en Streamlit Cloud. No vuelvas a pulsar ni recargues mientras se calculan las métricas.")
                 try:
                     result={}
                     for name,fit in fits.items():
-                        result[name]=(*final_test(fit),*recursive_test(fit,12))
+                        label="Evaluando diagnóstico LSTM: "+name
+                        evaluation_progress.progress(completed/total_steps,text=label)
+                        with st.spinner(label):
+                            result[name]=(*final_test(fit),*recursive_test(fit,12))
+                        completed+=1
                     if protocols:
-                        for protocol in protocols.values():
-                            evaluate_protocol(protocol)
+                        for name,protocol in protocols.items():
+                            label="Comparando modelos a 12 semanas: "+name
+                            evaluation_progress.progress(completed/total_steps,text=label)
+                            with st.spinner(label):
+                                evaluate_protocol(protocol)
+                            completed+=1
                     st.session_state["tests"]=result
+                    evaluation_progress.progress(1.0,text="Evaluación completada")
                     st.success("Prueba evaluada. No se usó para elegir modelos.")
                 except Exception as e:
                     st.error("Error en prueba: "+str(e))
@@ -281,7 +297,8 @@ with t4:
                 "demanda_mq":"Demanda MQ","demanda_cp":"Demanda CP","demanda_total":"Demanda total",
                 "produccion_cp":"Producción CP histórica estimada","produccion_total_referencia":"Producción total de referencia"})
             numeric=list(show.columns)[2:]
-            show[numeric]=show[numeric].round().astype(int)
+            show[numeric]=show[numeric].round(2)
+            st.caption("Pronósticos como cantidades esperadas, con dos decimales. El plan de fabricación realiza su propio redondeo a unidades enteras.")
             st.dataframe(show,hide_index=True,use_container_width=True)
             fig=go.Figure()
             for field,label in [("demanda_mq","Maquila"),("demanda_cp","Corte propio"),("demanda_total","Demanda total")]:

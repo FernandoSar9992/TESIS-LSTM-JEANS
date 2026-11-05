@@ -6,6 +6,7 @@ textColor = "#242424"
 font = "sans serif"
 
 [server]
+fileWatcherType = "none"
 maxUploadSize = 30
 headless = true
 

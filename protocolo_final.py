@@ -66,13 +66,13 @@ class Candidate:
 
 
 def encode(y, c):
-    a = np.log1p(y) if c.kind == 'log' else np.asarray(y, float)
+    a = np.log1p(y) if c.kind in ('log', 'direct') else np.asarray(y, float)
     return (a-c.mean)/c.std
 
 
 def decode(z, c):
     a = np.asarray(z, float)*c.std+c.mean
-    if c.kind == 'log':
+    if c.kind in ('log', 'direct'):
         a = np.exp(np.clip(a, -20, 20))*c.smear-1
     return np.maximum(0., a)
 

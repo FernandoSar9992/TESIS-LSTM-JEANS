@@ -60,6 +60,7 @@ class Candidate:
     smear: float = 1.
     alpha: float = .1
     settings: object = None
+    bias_correction: float = 0.
 
 
 def encode(y, c):
@@ -82,7 +83,7 @@ def recursive(c, history, horizon):
     for _ in range(int(horizon)):
         x = np.array(window[-c.lookback:], dtype='float32').reshape(1, c.lookback, 1)
         z = float(np.asarray(c.model(x, training=False))[0, 0])
-        value = float(decode(z, c))
+        value = max(0., float(decode(z, c)) + float(c.bias_correction))
         if not np.isfinite(value):
             raise ValueError('Pronóstico no finito')
         result.append(value)

@@ -32,7 +32,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v6 · Ventanas LSTM ampliadas y referencias estacionales 48/52 semanas · Capacidad compartida por recurso.")
+st.caption("Versión v7 · Evaluación fija y rolling de 12 semanas · Comparación LSTM y referencias · Capacidad compartida por recurso.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -212,7 +212,7 @@ with t2:
                 for protocol_name, protocol in protocols.items():
                     st.markdown("**"+protocol_name+"**")
                     st.dataframe(protocol['validation'].round(3),hide_index=True,use_container_width=True)
-            st.subheader("Diagnóstico del motor anterior: validación de demanda")
+            st.subheader("Diagnóstico del motor anterior: validación a un paso")
             rows=[]
             reference_rows=[]
             for name,fit in fits.items():
@@ -222,7 +222,7 @@ with t2:
                     rows.append(row)
                 reference_rows.extend([row,base_row])
             st.dataframe(pd.DataFrame(rows).round(3),hide_index=True,use_container_width=True)
-            st.caption("Se muestran los indicadores LSTM de las dos demandas; las referencias completas se conservan abajo y en el Excel.")
+            st.caption("Estas métricas usan el valor real de la semana anterior para predecir una semana. No representan el desempeño de un pronóstico fijo de 12 semanas.")
             selected=st.session_state.get("demand_choice")
             if selected is not None:
                 row=selected.comparison.iloc[0]
@@ -294,7 +294,19 @@ with t3:
                 for name,protocol in protocols.items():
                     protocol_test=protocol_test_results[name]
                     selected_test=protocol_test.loc[protocol_test['Modelo']==protocol['selected']]
+                    st.markdown("**Evaluación rolling-origin: varios orígenes, horizonte de 12 semanas — "+name+"**")
                     st.dataframe(selected_test.round(3),hide_index=True,use_container_width=True)
+                    fixed=protocol.get("fixed_test")
+                    if fixed is not None and not fixed.empty:
+                        st.markdown("**Evaluación fija: un único pronóstico de 12 semanas desde el inicio de TEST**")
+                        st.caption("Origen: "+str(protocol.get("fixed_test_origin_date"))+
+                                   ". No se incorporan ventas reales intermedias. Esta prueba es comparable con el diagnóstico anterior de primer origen.")
+                        keep=[protocol["selected"],protocol.get("best_comparison"),"LSTM demanda original"]
+                        keep=list(dict.fromkeys(x for x in keep if x))
+                        fixed_show=fixed.loc[fixed["Modelo"].isin(keep)]
+                        if fixed_show.empty:
+                            fixed_show=fixed.head(5)
+                        st.dataframe(fixed_show.round(3),hide_index=True,use_container_width=True)
             with st.expander("Anexo técnico: diagnóstico del motor anterior y referencias de prueba",expanded=False):
                     main_rows=[]
                     detail_rows=[]
@@ -313,14 +325,14 @@ with t3:
                         if selected.method!="LSTM validada":
                             main_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" (elegido en validación)","Semanas":len(chosen_table),**chosen_metrics})
                         detail_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
-                    st.subheader("Diagnóstico del motor anterior: primer origen de prueba")
-                    st.caption("Estas métricas y el gráfico siguiente corresponden a las LSTM anteriores. La selección que genera el pronóstico está en la tabla del protocolo común, arriba; usa todos los orígenes completos.")
+                    st.subheader("Diagnóstico del motor anterior: prueba fija de 12 semanas")
+                    st.caption("Este diagnóstico usa el primer bloque de TEST y corresponde al motor anterior. Compáralo con la tabla 'Evaluación fija' del protocolo actual, no con la evaluación rolling-origin.")
                     st.dataframe(pd.DataFrame(main_rows).round(3),hide_index=True,use_container_width=True)
                     if any(pd.notna(row.get("R²")) and row["R²"]<0 for row in main_rows):
                         st.info("Un R² negativo indica que la predicción no reproduce suficientemente la variación de esa serie. Se informa tal cual, sin modificar los datos de prueba.")
                     with st.expander("Ver todas las pruebas y métodos de referencia"):
                         st.dataframe(pd.DataFrame(detail_rows).round(3),hide_index=True,use_container_width=True)
-                        st.caption("Un paso usa valores reales de la semana anterior. Recursivo de 12 semanas no utiliza valores reales intermedios.")
+                        st.caption("Un paso utiliza el valor real de la semana previa. La evaluación fija de 12 semanas no utiliza valores reales intermedios; rolling-origin sí actualiza el contexto con semanas reales al avanzar cada origen.")
                     choice=st.selectbox("Gráfico diagnóstico de prueba del motor anterior",["Demanda de maquila","Demanda de corte propio"],key="test_series")
                     test_df=tests[choice][3]
                     fig=go.Figure()
@@ -389,7 +401,7 @@ with t4:
             if protocols:
                 weak=[n for n,p in protocols.items() if (p['test'].loc[p['test'].Modelo==p['selected'],'R²']<0).any()]
                 if weak:
-                    st.warning('Precisión limitada en prueba: '+', '.join(weak)+'. Evalúa escenarios de demanda antes de comprometer fabricación; generar el pronóstico no certifica su precisión.')
+                    st.warning('R² negativo en la evaluación rolling-origin de: '+', '.join(weak)+'. Revisa también la evaluación fija de 12 semanas; ambas responden a escenarios de actualización distintos. Generar el pronóstico no certifica su precisión.')
             st.dataframe(show,hide_index=True,use_container_width=True)
             fig=go.Figure()
             for field,label in [("demanda_mq","Maquila"),("demanda_cp","Corte propio"),("demanda_total","Demanda total")]:

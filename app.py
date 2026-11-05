@@ -47,7 +47,7 @@ with st.sidebar:
     st.caption("Ajustes de entrenamiento")
     look=st.number_input("Ventana histórica",min_value=4,max_value=24,value=12)
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
-    units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=24)
+    units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=16)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
     optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=False,
                          help="No es necesario para pronosticar las dos demandas ni para calcular la reposición. Actívalo solo si deseas analizar la producción histórica como serie independiente.")

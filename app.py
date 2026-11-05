@@ -173,55 +173,58 @@ with t2:
         st.info("Primero entrena en la pestaña 1.")
     else:
         if protocols:
-            st.subheader("Selección LSTM a 12 semanas y comparación con referencias")
-            st.caption("La configuración de 12 semanas, cuando está activada, elige arquitectura y épocas por RMSE recursivo de validación. Las métricas de validación son de desarrollo y los orígenes se solapan. Al desactivarla se conserva el motor v3. Las referencias no sustituyen la LSTM.")
+            st.subheader("Validación de la LSTM seleccionada")
+            st.caption("Se muestra el resultado del modelo LSTM que genera el pronóstico. Las comparaciones con métodos sencillos se conservan en el anexo técnico para justificar la elección; no se usan datos de prueba para seleccionar.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if protocol.get('best_comparison')!=protocol['selected']:
                     st.info("La comparación de validación favorece a "+protocol['best_comparison']+". Se mantiene LSTM por el alcance de la tesis; no se afirma superioridad.")
-                st.dataframe(protocol['validation'].round(3),hide_index=True)
+                selected_validation=protocol['validation'].loc[
+                    protocol['validation']['Modelo']==protocol['selected']]
+                st.dataframe(selected_validation.round(3),hide_index=True,use_container_width=True)
             st.caption("Dos etapas usa probabilidad empírica × media positiva y coincide con media histórica. Las comparaciones anteriores a un paso se conservan debajo como diagnóstico.")
-        st.subheader("Diagnóstico del motor anterior: validación de demanda")
-        rows=[]
-        reference_rows=[]
-        for name,fit in fits.items():
-            row={"Serie":name,"Modelo":"LSTM","Etapa":"Validación",**fit.validation_metrics}
-            base_row={"Serie":name,"Modelo":"Persistencia","Etapa":"Validación",**fit.baseline_validation_metrics}
-            if name.startswith("Demanda"):
-                rows.append(row)
-            reference_rows.extend([row,base_row])
-        st.dataframe(pd.DataFrame(rows).round(3),hide_index=True,use_container_width=True)
-        st.caption("Se muestran los indicadores LSTM de las dos demandas; las referencias completas se conservan abajo y en el Excel.")
-        selected=st.session_state.get("demand_choice")
-        if selected is not None:
-            row=selected.comparison.iloc[0]
-            st.caption("Demanda CP a "+str(selected.horizon)+" semanas: mejor método por MAE de validación = "+selected.method+
-                       "; MAE = "+format(row["MAE"],".2f")+".")
-        series_choice=st.selectbox("Gráfico de validación",["Demanda de maquila","Demanda de corte propio"],key="valid_series")
-        f=fits[series_choice]
-        fig=go.Figure()
-        for label,field,color in [("Real","real","#1B365D"),("LSTM","LSTM","#C39B00"),("Persistencia","Referencia_ultimo_valor","#8A8A8A")]:
-            fig.add_trace(go.Scatter(x=f.validation.fecha_inicio,y=f.validation[field],name=label,mode="lines+markers",line_color=color))
-        fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
-        st.plotly_chart(fig,use_container_width=True)
-        with st.expander("Comparaciones metodológicas y curva de aprendizaje"):
-            st.markdown("**Comparación con persistencia (validación)**")
-            st.dataframe(pd.DataFrame(reference_rows).round(3),hide_index=True,use_container_width=True)
+        with st.expander("Anexo técnico: comparaciones y diagnóstico del motor anterior",expanded=False):
+            st.subheader("Diagnóstico del motor anterior: validación de demanda")
+            rows=[]
+            reference_rows=[]
+            for name,fit in fits.items():
+                row={"Serie":name,"Modelo":"LSTM","Etapa":"Validación",**fit.validation_metrics}
+                base_row={"Serie":name,"Modelo":"Persistencia","Etapa":"Validación",**fit.baseline_validation_metrics}
+                if name.startswith("Demanda"):
+                    rows.append(row)
+                reference_rows.extend([row,base_row])
+            st.dataframe(pd.DataFrame(rows).round(3),hide_index=True,use_container_width=True)
+            st.caption("Se muestran los indicadores LSTM de las dos demandas; las referencias completas se conservan abajo y en el Excel.")
+            selected=st.session_state.get("demand_choice")
             if selected is not None:
-                st.markdown("**Métodos de demanda CP: pronóstico recursivo**")
-                st.dataframe(selected.comparison.round(3),hide_index=True,use_container_width=True)
-                st.caption("Las ventanas de validación se solapan y no equivalen a observaciones independientes.")
-            if optional and st.session_state.get("cp_choice") is not None:
-                st.markdown("**Producción CP: métodos de producción intermitente**")
-                st.dataframe(st.session_state["cp_choice"].comparison.round(3),hide_index=True,use_container_width=True)
-            loss=f.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
-            st.line_chart(loss)
+                row=selected.comparison.iloc[0]
+                st.caption("Demanda CP a "+str(selected.horizon)+" semanas: mejor método por MAE de validación = "+selected.method+
+                           "; MAE = "+format(row["MAE"],".2f")+".")
+            series_choice=st.selectbox("Gráfico de validación",["Demanda de maquila","Demanda de corte propio"],key="valid_series")
+            f=fits[series_choice]
+            fig=go.Figure()
+            for label,field,color in [("Real","real","#1B365D"),("LSTM","LSTM","#C39B00"),("Persistencia","Referencia_ultimo_valor","#8A8A8A")]:
+                fig.add_trace(go.Scatter(x=f.validation.fecha_inicio,y=f.validation[field],name=label,mode="lines+markers",line_color=color))
+            fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
+            st.plotly_chart(fig,use_container_width=True)
+            with st.expander("Comparaciones metodológicas y curva de aprendizaje"):
+                st.markdown("**Comparación con persistencia (validación)**")
+                st.dataframe(pd.DataFrame(reference_rows).round(3),hide_index=True,use_container_width=True)
+                if selected is not None:
+                    st.markdown("**Métodos de demanda CP: pronóstico recursivo**")
+                    st.dataframe(selected.comparison.round(3),hide_index=True,use_container_width=True)
+                    st.caption("Las ventanas de validación se solapan y no equivalen a observaciones independientes.")
+                if optional and st.session_state.get("cp_choice") is not None:
+                    st.markdown("**Producción CP: métodos de producción intermitente**")
+                    st.dataframe(st.session_state["cp_choice"].comparison.round(3),hide_index=True,use_container_width=True)
+                loss=f.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
+                st.line_chart(loss)
 
 with t3:
     if not fits:
         st.info("Primero entrena los modelos.")
     else:
-        st.subheader("Prueba final con semanas reservadas")
+        st.subheader("Prueba final de la LSTM seleccionada")
         if st.session_state.get("tests") is None:
             if st.button("Evaluar PRUEBA",type="primary",use_container_width=True):
                 total_steps=len(fits)+len(protocols or {})
@@ -254,40 +257,43 @@ with t3:
                 st.subheader("Prueba del protocolo seleccionado sin reajustes")
                 for name,protocol in protocols.items():
                     st.write(name+": elegido en validación = "+protocol['selected'])
-                    st.dataframe(evaluate_protocol(protocol).round(3),hide_index=True)
-            main_rows=[]
-            detail_rows=[]
-            for name,values in tests.items():
-                one,m,b,rolling,rm,rb=values
-                if name.startswith("Demanda"):
-                    main_rows.append({"Serie":name,"Método":"LSTM recursiva (12 semanas)","Semanas":len(rolling),**rm})
-                detail_rows.extend([
-                    {"Serie":name,"Método":"LSTM, un paso","Semanas":len(one),**m},
-                    {"Serie":name,"Método":"Persistencia, un paso","Semanas":len(one),**b},
-                    {"Serie":name,"Método":"LSTM, recursivo 12","Semanas":len(rolling),**rm},
-                    {"Serie":name,"Método":"Persistencia fija, recursivo 12","Semanas":len(rolling),**rb}])
-            selected=st.session_state.get("demand_choice")
-            if selected:
-                chosen_table,chosen_metrics=evaluate_demand_test(fits["Demanda de corte propio"],selected,12)
-                if selected.method!="LSTM validada":
-                    main_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" (elegido en validación)","Semanas":len(chosen_table),**chosen_metrics})
-                detail_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
-            st.subheader("Diagnóstico del motor anterior: primer origen de prueba")
-            st.caption("Estas métricas y el gráfico siguiente corresponden a las LSTM anteriores. La selección que genera el pronóstico está en la tabla del protocolo común, arriba; usa todos los orígenes completos.")
-            st.dataframe(pd.DataFrame(main_rows).round(3),hide_index=True,use_container_width=True)
-            if any(pd.notna(row.get("R²")) and row["R²"]<0 for row in main_rows):
-                st.info("Un R² negativo indica que la predicción no reproduce suficientemente la variación de esa serie. Se informa tal cual, sin modificar los datos de prueba.")
-            with st.expander("Ver todas las pruebas y métodos de referencia"):
-                st.dataframe(pd.DataFrame(detail_rows).round(3),hide_index=True,use_container_width=True)
-                st.caption("Un paso usa valores reales de la semana anterior. Recursivo de 12 semanas no utiliza valores reales intermedios.")
-            choice=st.selectbox("Gráfico diagnóstico de prueba del motor anterior",["Demanda de maquila","Demanda de corte propio"],key="test_series")
-            test_df=tests[choice][3]
-            fig=go.Figure()
-            fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.real,name="Real",mode="lines+markers"))
-            fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.LSTM,name="LSTM recursiva",mode="lines+markers"))
-            fig.update_layout(template="plotly_white",height=310,yaxis_title="Pantalones/semana")
-            st.plotly_chart(fig,use_container_width=True)
-            st.caption("El R² puede ser negativo cuando no se anticipan bien las variaciones. Las métricas de TEST se conservan sin ajustes posteriores.")
+                    protocol_test=evaluate_protocol(protocol)
+                    selected_test=protocol_test.loc[protocol_test['Modelo']==protocol['selected']]
+                    st.dataframe(selected_test.round(3),hide_index=True,use_container_width=True)
+        with st.expander("Anexo técnico: diagnóstico del motor anterior y referencias de prueba",expanded=False):
+                main_rows=[]
+                detail_rows=[]
+                for name,values in tests.items():
+                    one,m,b,rolling,rm,rb=values
+                    if name.startswith("Demanda"):
+                        main_rows.append({"Serie":name,"Método":"LSTM recursiva (12 semanas)","Semanas":len(rolling),**rm})
+                    detail_rows.extend([
+                        {"Serie":name,"Método":"LSTM, un paso","Semanas":len(one),**m},
+                        {"Serie":name,"Método":"Persistencia, un paso","Semanas":len(one),**b},
+                        {"Serie":name,"Método":"LSTM, recursivo 12","Semanas":len(rolling),**rm},
+                        {"Serie":name,"Método":"Persistencia fija, recursivo 12","Semanas":len(rolling),**rb}])
+                selected=st.session_state.get("demand_choice")
+                if selected:
+                    chosen_table,chosen_metrics=evaluate_demand_test(fits["Demanda de corte propio"],selected,12)
+                    if selected.method!="LSTM validada":
+                        main_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" (elegido en validación)","Semanas":len(chosen_table),**chosen_metrics})
+                    detail_rows.append({"Serie":"Demanda de corte propio","Método":selected.method+" elegido, recursivo 12","Semanas":len(chosen_table),**chosen_metrics})
+                st.subheader("Diagnóstico del motor anterior: primer origen de prueba")
+                st.caption("Estas métricas y el gráfico siguiente corresponden a las LSTM anteriores. La selección que genera el pronóstico está en la tabla del protocolo común, arriba; usa todos los orígenes completos.")
+                st.dataframe(pd.DataFrame(main_rows).round(3),hide_index=True,use_container_width=True)
+                if any(pd.notna(row.get("R²")) and row["R²"]<0 for row in main_rows):
+                    st.info("Un R² negativo indica que la predicción no reproduce suficientemente la variación de esa serie. Se informa tal cual, sin modificar los datos de prueba.")
+                with st.expander("Ver todas las pruebas y métodos de referencia"):
+                    st.dataframe(pd.DataFrame(detail_rows).round(3),hide_index=True,use_container_width=True)
+                    st.caption("Un paso usa valores reales de la semana anterior. Recursivo de 12 semanas no utiliza valores reales intermedios.")
+                choice=st.selectbox("Gráfico diagnóstico de prueba del motor anterior",["Demanda de maquila","Demanda de corte propio"],key="test_series")
+                test_df=tests[choice][3]
+                fig=go.Figure()
+                fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.real,name="Real",mode="lines+markers"))
+                fig.add_trace(go.Scatter(x=test_df.fecha_inicio,y=test_df.LSTM,name="LSTM recursiva",mode="lines+markers"))
+                fig.update_layout(template="plotly_white",height=310,yaxis_title="Pantalones/semana")
+                st.plotly_chart(fig,use_container_width=True)
+                st.caption("El R² puede ser negativo cuando no se anticipan bien las variaciones. Las métricas de TEST se conservan sin ajustes posteriores.")
 
 with t4:
     tests=st.session_state.get("tests")

@@ -23,6 +23,7 @@ from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_te
 from planificacion_reposicion import calcular_plan_reposicion
 from capacidad_recursos import read_capacity, loads as resource_loads
 from lstm_validacion_horizonte import select_frozen, future_search
+from lstm_directo import select_direct
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
 from protocolo_final import (confirm_pre_sales, select as select_protocol,
@@ -155,7 +156,15 @@ with t1:
                 if use_validated:
                     st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'))
                                                   for name,p in st.session_state['protocols'].items()}
-            st.success("Entrenamiento y validación completados.")
+                # Experimento predefinido: comparar LSTM recursiva y directa
+                # con los mismos orígenes temporales de VALIDACIÓN.
+                with st.spinner("Comparando LSTM recursiva y directa a 12 semanas; puede tardar unos minutos..."):
+                    for name in ("Demanda de maquila", "Demanda de corte propio"):
+                        st.session_state['protocols'][name]=select_direct(
+                            series[name], settings,
+                            control=st.session_state['protocols'][name],
+                            calibrate_bias=(name=="Demanda de corte propio"))
+            st.success("Entrenamiento y comparación temporal completados.")
         except ImportError as e:
             st.session_state.pop("fits",None)
             st.session_state.pop("protocols",None)
@@ -174,7 +183,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Se muestra el resultado del modelo LSTM que genera el pronóstico. Las comparaciones con métodos sencillos se conservan en el anexo técnico para justificar la elección; no se usan datos de prueba para seleccionar.")
+            st.caption("Se comparan LSTM recursivas y directas de 12 semanas mediante VALIDACIÓN temporal. La arquitectura se selecciona sin consultar PRUEBA; los métodos sencillos permanecen como referencias.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:
@@ -185,7 +194,7 @@ with t2:
                 selected_validation=protocol['validation'].loc[
                     protocol['validation']['Modelo']==protocol['selected']]
                 st.dataframe(selected_validation.round(3),hide_index=True,use_container_width=True)
-            st.caption("Dos etapas usa probabilidad empírica × media positiva y coincide con media histórica. Las comparaciones anteriores a un paso se conservan debajo como diagnóstico.")
+            st.caption("La selección principal corresponde a una LSTM (recursiva o directa) elegida por RMSE de VALIDACIÓN a 12 semanas. Las comparaciones con referencias se conservan en el anexo técnico.")
         with st.expander("Anexo técnico: comparaciones y diagnóstico del motor anterior",expanded=False):
             st.subheader("Diagnóstico del motor anterior: validación de demanda")
             rows=[]

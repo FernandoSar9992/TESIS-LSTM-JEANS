@@ -128,7 +128,11 @@ def future_search(selection,first_plan,weeks=12,refit=False):
     c=selection['candidates'][selection['selected']]
     y=s.valor.to_numpy(float)
     if refit:
-        c=train_fixed(y,c.kind,c.settings,c.epochs)
-        c.bias_correction=float(selection.get('bias_correction',0.0))
+        if getattr(c,'strategy','recursive') == 'direct':
+            from lstm_directo import train_direct
+            c=train_direct(y,c.settings,c.lookback,c.epochs,c.output_horizon)
+        else:
+            c=train_fixed(y,c.kind,c.settings,c.epochs)
+        c.bias_correction=float(selection.get('bias_correction',getattr(c,'bias_correction',0.0)))
     pred=recursive(c,y,weeks+days//7)[days//7:]
     return pd.DataFrame({'fecha_inicio':pd.date_range(first_plan,periods=weeks,freq='7D'),'pronostico':pred})

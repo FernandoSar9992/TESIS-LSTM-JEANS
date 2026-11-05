@@ -15,6 +15,8 @@ from protocolo_final import Candidate, compare, choose_lstm, origins
 HORIZON = 12
 LOOKBACKS = (8, 12, 16)
 EPOCHS = (10, 30, 60, 100)
+LONG_LOOKBACKS = (26, 52)
+LONG_EPOCHS = (30, 60)
 
 
 def _scale(y):
@@ -89,6 +91,17 @@ def select_direct(series, settings=None, control=None, progress=None, horizon=HO
             candidates[candidate_name] = candidate
             table, detail = compare({candidate_name: candidate}, y, tr, ve, y[:tr], horizon)
             tables.append(table); details.append(detail)
+    # Ventanas semestral y anual para capturar patrones más largos.
+    for lookback in LONG_LOOKBACKS:
+        config = replace(settings, lookback=lookback)
+        for epoch in LONG_EPOCHS:
+            name = f"H12 LSTM directa log1p w{lookback} u{config.units} e{epoch}"
+            if progress:
+                progress(name)
+            candidate = train_direct(y[:tr], config, lookback, epoch, horizon)
+            candidates[name] = candidate
+            table, detail = compare({name: candidate}, y, tr, ve, y[:tr], horizon)
+            tables.append(table); details.append(detail)
     table = pd.concat(tables, ignore_index=True).sort_values(
         ["RMSE", "MAE", "Modelo"], kind="stable").reset_index(drop=True)
     selected = choose_lstm(table, candidates)
@@ -102,11 +115,11 @@ def select_direct(series, settings=None, control=None, progress=None, horizon=HO
         bias_correction = float(candidates[selected].bias_correction) + float(np.mean(residual))
         candidates[selected].bias_correction = bias_correction
     kept = {k:v for k,v in candidates.items()
-            if k == selected or not (k.startswith("H12 LSTM directa") and k != selected)}
+            if k == selected or not (k.startswith("H12 ") and k != selected)}
     return {
         "selected": selected,
         "best_comparison": str(table.iloc[0].Modelo),
-        "selection_policy": "Comparación predefinida recursiva vs. directa; RMSE de VALIDACIÓN a 12 semanas",
+        "selection_policy": "LSTM recursiva/directa con ventanas 8, 12, 16, 26 y 52; RMSE de VALIDACIÓN a 12 semanas",
         "candidates": kept,
         "validation": table,
         "validation_predictions": pd.concat(details, ignore_index=True),

@@ -164,8 +164,10 @@ with t1:
                                                else select_protocol(frame,True,settings))
                                                for name,frame in series.items()}
                 if use_validated:
-                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'),allow_statistical=(name=='Producción de corte propio'))
-                                                  for name,p in st.session_state['protocols'].items()}
+                    st.session_state['protocols']={name:(p if name.startswith('Demanda') else
+                        select_frozen(series[name],validated_config['models'][name],p,
+                                      calibrate_bias=False,allow_statistical=True))
+                        for name,p in st.session_state['protocols'].items()}
                 # LSTM residual estacional: aprende la desviación frente al mismo
                 # período de hace 52 semanas. Cada origen se entrena solo con su pasado.
                 with st.spinner("Entrenando y validando LSTM residual estacional a 12 semanas..."):

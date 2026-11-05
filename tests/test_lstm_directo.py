@@ -81,7 +81,7 @@ class DirectHorizonTests(unittest.TestCase):
             changed = s.copy()
             changed.loc[control["validation_end"]:, "valor"] = 999999.
             second = select_direct(changed, settings, control=control)
-        self.assertEqual(len(seen), 2*len((8, 12, 16))*len((10, 30, 60, 100)))
+        self.assertEqual(len(seen), 2*(len((8, 12, 16))*len((10, 30, 60, 100)) + len((26, 52))*len((30, 60))))
         for values in seen:
             np.testing.assert_array_equal(values, s.valor.iloc[:tr].to_numpy())
         self.assertEqual(first["selected"], second["selected"])

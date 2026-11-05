@@ -32,7 +32,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v4 · LSTM evaluadas a 12 semanas · Capacidad compartida por recurso.")
+st.caption("Versión v5 · Comparación LSTM recursiva/directa a 12 semanas · Capacidad compartida por recurso.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -102,7 +102,9 @@ use_validated=st.checkbox('Usar configuración LSTM elegida por validación de 1
     value=profile_available,disabled=not profile_available,
     help='Disponible para la base auditada, con ceros iniciales confirmados y ajustes manuales por defecto. No garantiza alta precisión en las tres series.')
 if use_validated:
-    st.caption('Configuración congelada: 16 unidades; épocas elegidas por serie. No se repite la búsqueda en la app. El bloque de prueba ya fue observado en revisiones anteriores.')
+    st.caption('Configuración de referencia: 16 unidades; épocas previamente elegidas por serie. La app vuelve a comparar LSTM recursiva y directa usando únicamente VALIDACIÓN.')
+    if validated_config.get("test_previously_observed", False):
+        st.warning("Nota metodológica: el bloque TEST de esta base ya fue consultado en iteraciones anteriores. Se mantiene fuera de la selección actual, pero debe interpretarse como un holdout reutilizado, no como una evaluación completamente independiente o ciega.")
 signature=sha256(b'lstm-horizonte-v5-direct'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature

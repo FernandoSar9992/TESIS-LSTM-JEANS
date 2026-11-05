@@ -32,6 +32,28 @@ def baseline(history, method, horizon, alpha=.1):
     y = np.asarray(history, float)
     if not len(y) or not np.isfinite(y).all() or (y < 0).any():
         raise ValueError('Historial inválido')
+    if method in ('Naive estacional 48', 'Naive estacional 52'):
+        period = int(method.split()[-1])
+        if len(y) < period:
+            raise ValueError(f'El benchmark estacional {period} requiere al menos {period} semanas previas.')
+        season = y[-period:]
+        return np.maximum(0.0, np.asarray([season[i % period] for i in range(int(horizon))]))
+    if method in ('TSB', 'SBA'):
+        value = predict_one(y, method, alpha)
+    elif method == 'Persistencia':
+        value = y[-1]
+    elif method.startswith('Media móvil'):
+        value = y[-int(method.split()[-1]):].mean()
+    elif method == 'Media histórica':
+        value = y.mean()
+    elif method == 'Dos etapas':
+        value = (y > 0).mean() * (y[y > 0].mean() if (y > 0).any() else 0.)
+    else:
+        raise ValueError(method)
+    return np.repeat(float(value), int(horizon))
+    y = np.asarray(history, float)
+    if not len(y) or not np.isfinite(y).all() or (y < 0).any():
+        raise ValueError('Historial inválido')
     if method in ('TSB', 'SBA'):
         value = predict_one(y, method, alpha)
     elif method == 'Persistencia':
@@ -206,12 +228,19 @@ def compare(candidates, y, start, end, train_reference, horizon=12):
 
 
 def choose_lstm(validation, candidates):
-    """Restricción de tesis: referencias se comparan, nunca sustituyen la LSTM."""
+    """La demanda principal conserva una LSTM como exige el alcance de tesis."""
     eligible=[name for name,c in candidates.items() if c.model is not None]
-    ranked=validation.loc[validation.Modelo.isin(eligible)].sort_values(
-        ['RMSE','MAE','Modelo'],kind='stable')
+    ranked=validation.loc[validation.Modelo.isin(eligible)].sort_values(['RMSE','MAE','Modelo'],kind='stable')
     if ranked.empty:
         raise ValueError('No hay una LSTM elegible para el pronóstico principal.')
+    return str(ranked.iloc[0].Modelo)
+
+
+def choose_best(validation, candidates):
+    """Selecciona el menor RMSE de VALIDACIÓN entre todos los candidatos."""
+    ranked=validation.loc[validation.Modelo.isin(list(candidates))].sort_values(['RMSE','MAE','Modelo'],kind='stable')
+    if ranked.empty:
+        raise ValueError('No hay candidatos evaluables en VALIDACIÓN.')
     return str(ranked.iloc[0].Modelo)
 
 
@@ -231,16 +260,20 @@ def select(series, production=False, settings=None):
             for alpha in (.05, .1, .2, .3):
                 candidates[f'{method} {alpha}'] = Candidate(method, None, 0, 1, 0, 0, alpha=alpha)
         candidates['Dos etapas'] = Candidate('Dos etapas', None, 0, 1, 0, 0)
-    for method in ('Persistencia', 'Media móvil 4', 'Media móvil 8', 'Media histórica'):
+    methods = ['Persistencia', 'Media móvil 4', 'Media móvil 8', 'Media histórica']
+    methods.extend([f'Naive estacional {period}' for period in (48, 52) if tr >= period])
+    for method in methods:
         candidates[method] = Candidate(method, None, 0, 1, 0, 0)
     table, detail = compare(candidates, y, tr, ve, y[:tr])
     table = table.sort_values(['RMSE', 'MAE', 'Modelo'], kind='stable').reset_index(drop=True)
-    return {'selected': choose_lstm(table,candidates),
-            'best_comparison':str(table.iloc[0].Modelo),'selection_policy':'LSTM obligatoria',
-            'candidates': candidates,
-            'validation': table, 'validation_predictions': detail,
-            'train_end': tr, 'validation_end': ve, 'series': series.copy(),
-            'settings': settings, 'smear': smear, 'test': None}
+    selected = choose_best(table, candidates) if production else choose_lstm(table, candidates)
+    policy = ('Menor RMSE de VALIDACIÓN a 12 semanas entre LSTM y referencias estadísticas'
+              if production else 'LSTM obligatoria; referencias estadísticas solo como comparación')
+    return {'selected': selected, 'best_comparison':str(table.iloc[0].Modelo),
+            'selection_policy':policy, 'allow_baseline_forecast':bool(production),
+            'candidates':candidates, 'validation':table, 'validation_predictions':detail,
+            'train_end':tr, 'validation_end':ve, 'series':series.copy(),
+            'settings':settings, 'smear':smear, 'test':None}
 
 
 def demand_from_fit(fit):
@@ -258,7 +291,9 @@ def demand_from_fit(fit):
     c = Candidate('log', fit.model, fit.mean, fit.std, fit.settings.lookback,
                   fit.best_epoch, settings=fit.settings)
     candidates = {name: c}
-    for method in ('Persistencia', 'Media móvil 4', 'Media móvil 8', 'Media histórica'):
+    methods = ['Persistencia', 'Media móvil 4', 'Media móvil 8', 'Media histórica']
+    methods.extend([f'Naive estacional {period}' for period in (48, 52) if tr >= period])
+    for method in methods:
         candidates[method] = Candidate(method, None, 0, 1, 0, 0)
     table, detail = compare(candidates, y, tr, ve, y[:tr])
     table = table.sort_values(['RMSE','MAE','Modelo'],kind='stable').reset_index(drop=True)
@@ -289,8 +324,8 @@ def future(selection, first_plan, weeks=12, refit=True):
         raise ValueError('Fecha u horizonte inválido')
     y = s.valor.to_numpy(float)
     c = selection['candidates'][selection['selected']]
-    if c.model is None:
-        raise ValueError('El pronóstico principal debe ser LSTM; las referencias son solo comparación.')
+    if c.model is None and not selection.get('allow_baseline_forecast', False):
+        raise ValueError('El pronóstico principal de demanda debe ser LSTM; las referencias son solo comparación.')
     if 'original_demand_fit' in selection:
         from motor_lstm import full_refit_forecast
         from pronostico_horizonte import forecast_lstm_verified

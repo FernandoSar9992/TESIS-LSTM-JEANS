@@ -128,6 +128,42 @@ def prepare_base(raw: pd.DataFrame, today: date | None = None) -> tuple[pd.DataF
     return current, info
 
 
+def audit_inventory(history: pd.DataFrame, tolerance: float = 0.01) -> dict[str, Any]:
+    """Audita el kardex CP sin modificar ni completar los datos originales."""
+    required = ("fecha_inicio", "produccion_cp", "demanda_cp",
+                "inventario_inicial_cp", "inventario_final_cp")
+    missing = [column for column in required if column not in history.columns]
+    if missing:
+        return {"available": False, "missing_columns": missing}
+    production = pd.to_numeric(history["produccion_cp"], errors="coerce").fillna(0).to_numpy(float)
+    starts = np.flatnonzero(production > 0)
+    if not len(starts):
+        return {"available": False, "reason": "No existe producción positiva de corte propio."}
+    segment = history.iloc[int(starts[0]):].reset_index(drop=True)
+    cols = ["produccion_cp", "demanda_cp", "inventario_inicial_cp", "inventario_final_cp"]
+    values = segment[cols].apply(pd.to_numeric, errors="coerce")
+    complete = values.notna().all(axis=1).to_numpy()
+    expected = values["inventario_inicial_cp"] + values["produccion_cp"] - values["demanda_cp"]
+    balance = (expected - values["inventario_final_cp"]).to_numpy(float)
+    checked_balance = balance[complete]
+    carry = (values["inventario_inicial_cp"].iloc[1:].to_numpy(float)
+             - values["inventario_final_cp"].iloc[:-1].to_numpy(float))
+    carry_complete = complete[1:] & complete[:-1]
+    checked_carry = carry[carry_complete]
+    return {
+        "available": True,
+        "first_week": pd.Timestamp(segment["fecha_inicio"].iloc[0]).date(),
+        "last_week": pd.Timestamp(segment["fecha_inicio"].iloc[-1]).date(),
+        "weeks_expected": int(len(segment)),
+        "weeks_checked": int(complete.sum()),
+        "weeks_missing": int((~complete).sum()),
+        "balance_errors": int((np.abs(checked_balance) > tolerance).sum()),
+        "carry_errors": int((np.abs(checked_carry) > tolerance).sum()),
+        "max_abs_balance_error": float(np.max(np.abs(checked_balance))) if len(checked_balance) else None,
+        "max_abs_carry_error": float(np.max(np.abs(checked_carry))) if len(checked_carry) else None,
+    }
+
+
 def extract_series(history: pd.DataFrame, target: str) -> pd.DataFrame:
     """Respeta el inicio de cada modalidad; conserva ceros válidos posteriores."""
     if target not in TARGETS.values():

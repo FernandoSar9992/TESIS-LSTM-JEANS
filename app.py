@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,extract_series,fit_one,
+from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,audit_inventory,extract_series,fit_one,
                          final_test,recursive_test,make_forecast_table)
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
                                   forecast_lstm_verified,forecast_demand_selected)
@@ -32,7 +32,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v5 · Comparación LSTM recursiva/directa a 12 semanas · Capacidad compartida por recurso.")
+st.caption("Versión v6 · Ventanas LSTM ampliadas y referencias estacionales 48/52 semanas · Capacidad compartida por recurso.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -90,6 +90,7 @@ try:
         help="Se preselecciona únicamente para el archivo exacto ya auditado y confirmado. Completa solo esas cinco semanas; no convierte en ceros las semanas anteriores al inicio de corte propio."
     )
     base,zero_trace=confirm_pre_sales(base,confirm_zeros)
+    inventory_audit=audit_inventory(base)
     names={"Demanda de maquila":"demanda_mq","Demanda de corte propio":"demanda_cp"}
     if optional: names["Producción de corte propio"]="produccion_cp"
     series={name:extract_series(base,col) for name,col in names.items()}
@@ -128,13 +129,20 @@ with st.expander("Datos y trazabilidad"):
     st.caption("Los registros se leen sin modificar. Los ceros reales de producción permanecen.")
     if not zero_trace.empty:
         st.dataframe(zero_trace,hide_index=True)
+    if inventory_audit.get("available"):
+        st.caption(f"Auditoría de inventario CP: {inventory_audit['weeks_checked']}/{inventory_audit['weeks_expected']} semanas verificadas; "
+                   f"errores de balance: {inventory_audit['balance_errors']}; errores de continuidad: {inventory_audit['carry_errors']}.")
+        if inventory_audit['weeks_missing'] or inventory_audit['balance_errors'] or inventory_audit['carry_errors']:
+            st.warning("La auditoría detectó faltantes o diferencias en el kardex CP. Revisa los registros antes de planificar.")
+        else:
+            st.success("Kardex CP verificado: inventario final = inicial + producción − demanda, con continuidad semanal.")
     if info["diferencias_en_total_archivo"]:
         st.warning("El campo de producción total del archivo difiere de la suma MQ+CP en "+str(info["diferencias_en_total_archivo"])+" semanas.")
 
 t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
 with t1:
     st.subheader("Entrenar LSTM de demanda y producción")
-    st.write("Se entrenan las dos demandas. La producción histórica CP es un análisis complementario opcional y permanece desactivada para agilizar el pronóstico de demanda. Cada serie usa su propia LSTM y el escalado se ajusta solo con entrenamiento.")
+    st.write("Se entrenan por separado las dos demandas. La búsqueda compara ventanas LSTM locales y largas (8, 12, 16, 26 y 52 semanas) y referencias estacionales de 48 y 52 semanas. La producción CP es complementaria y puede seleccionar LSTM Hurdle o referencias estadísticas usando solo VALIDACIÓN.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
         for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
             st.session_state.pop(k,None)
@@ -156,7 +164,7 @@ with t1:
                                                else select_protocol(frame,True,settings))
                                                for name,frame in series.items()}
                 if use_validated:
-                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'))
+                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'),allow_statistical=(name=='Producción de corte propio'))
                                                   for name,p in st.session_state['protocols'].items()}
                 # Experimento predefinido: comparar LSTM recursiva y directa
                 # con los mismos orígenes temporales de VALIDACIÓN.
@@ -185,7 +193,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Se comparan LSTM recursivas y directas de 12 semanas mediante VALIDACIÓN temporal. La arquitectura se selecciona sin consultar PRUEBA; los métodos sencillos permanecen como referencias.")
+            st.caption("Las demandas se seleccionan entre LSTM recursiva y directa mediante VALIDACIÓN. Se incluyen referencias estacionales de 48 y 52 semanas. La producción CP es complementaria y puede elegir entre LSTM Hurdle y métodos estadísticos, siempre por VALIDACIÓN.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:
@@ -196,8 +204,14 @@ with t2:
                 selected_validation=protocol['validation'].loc[
                     protocol['validation']['Modelo']==protocol['selected']]
                 st.dataframe(selected_validation.round(3),hide_index=True,use_container_width=True)
-            st.caption("La selección principal corresponde a una LSTM (recursiva o directa) elegida por RMSE de VALIDACIÓN a 12 semanas. Las comparaciones con referencias se conservan en el anexo técnico.")
+            st.caption("Las dos demandas mantienen una LSTM como modelo principal por el alcance de la tesis. Las referencias estacionales permiten evaluar si la red añade valor; no se afirma superioridad cuando no la hay. Producción CP se selecciona por VALIDACIÓN como análisis complementario.")
         with st.expander("Anexo técnico: comparaciones y diagnóstico del motor anterior",expanded=False):
+            if protocols:
+                st.subheader("Comparación de modelos a 12 semanas — VALIDACIÓN")
+                st.caption("Todos los candidatos comparten orígenes y horizonte. TEST no participa en la selección.")
+                for protocol_name, protocol in protocols.items():
+                    st.markdown("**"+protocol_name+"**")
+                    st.dataframe(protocol['validation'].round(3),hide_index=True,use_container_width=True)
             st.subheader("Diagnóstico del motor anterior: validación de demanda")
             rows=[]
             reference_rows=[]

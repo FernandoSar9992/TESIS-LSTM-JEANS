@@ -63,7 +63,7 @@ def train_direct(y, settings, lookback, epochs, horizon=HORIZON):
                      settings=settings, strategy="direct", output_horizon=horizon)
 
 
-def select_direct(series, settings=None, control=None, progress=None, horizon=HORIZON):
+def select_direct(series, settings=None, control=None, progress=None, horizon=HORIZON, calibrate_bias=False):
     """Compara LSTM directas y recursivas sobre idénticos orígenes de VALIDACIÓN."""
     settings = settings or Settings()
     if int(horizon) != HORIZON:
@@ -92,6 +92,15 @@ def select_direct(series, settings=None, control=None, progress=None, horizon=HO
     table = pd.concat(tables, ignore_index=True).sort_values(
         ["RMSE", "MAE", "Modelo"], kind="stable").reset_index(drop=True)
     selected = choose_lstm(table, candidates)
+    bias_correction = 0.0
+    if calibrate_bias:
+        selected_rows = pd.concat(details, ignore_index=True)
+        selected_rows = selected_rows.loc[selected_rows["Modelo"] == selected]
+        residual = (selected_rows["real"]-selected_rows["prediccion"]).to_numpy(dtype=float)
+        if not len(residual) or not np.isfinite(residual).all():
+            raise ValueError("No hay residuos finitos de VALIDACIÓN para calibrar el sesgo.")
+        bias_correction = float(np.mean(residual))
+        candidates[selected].bias_correction = bias_correction
     kept = {k:v for k,v in candidates.items()
             if k == selected or not (k.startswith("H12 LSTM directa") and k != selected)}
     return {
@@ -108,6 +117,7 @@ def select_direct(series, settings=None, control=None, progress=None, horizon=HO
         "test": None,
         "horizon_search": True,
         "direct_horizon": horizon,
+        "bias_correction": bias_correction,
     }
 
 

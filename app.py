@@ -194,7 +194,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Las demandas se seleccionan entre LSTM recursiva y directa mediante VALIDACIÓN. Se incluyen referencias estacionales de 48 y 52 semanas. La producción CP es complementaria y puede elegir entre LSTM Hurdle y métodos estadísticos, siempre por VALIDACIÓN.")
+            st.caption("Las demandas usan una LSTM residual estacional de 52 semanas, seleccionada y evaluada con orígenes cronológicos de VALIDACIÓN. Se muestran referencias estacionales de 48 y 52 semanas. La producción CP, si se activa, permanece como análisis complementario.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:

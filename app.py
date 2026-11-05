@@ -103,7 +103,7 @@ use_validated=st.checkbox('Usar configuración LSTM elegida por validación de 1
     help='Disponible para la base auditada, con ceros iniciales confirmados y ajustes manuales por defecto. No garantiza alta precisión en las tres series.')
 if use_validated:
     st.caption('Configuración congelada: 16 unidades; épocas elegidas por serie. No se repite la búsqueda en la app. El bloque de prueba ya fue observado en revisiones anteriores.')
-signature=sha256(b'lstm-horizonte-v4'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
+signature=sha256(b'lstm-horizonte-v5-direct'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):

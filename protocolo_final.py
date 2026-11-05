@@ -301,7 +301,8 @@ def future(selection, first_plan, weeks=12, refit=True):
         return result
     if refit and c.model is not None:
         # New object: evaluation network, scaling and metrics remain untouched.
-        c = replace(train_candidate(y, c.kind, c.settings, c.epochs), smear=c.smear)
+        c = replace(train_candidate(y, c.kind, c.settings, c.epochs),
+                    smear=c.smear, bias_correction=c.bias_correction)
     bridge = days//7
     pred = recursive(c, y, weeks+bridge)[bridge:]
     return pd.DataFrame({'fecha_inicio': pd.date_range(first_plan, periods=weeks, freq='7D'),

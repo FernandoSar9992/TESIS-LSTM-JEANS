@@ -51,24 +51,6 @@ def baseline(history, method, horizon, alpha=.1):
     else:
         raise ValueError(method)
     return np.repeat(float(value), int(horizon))
-    y = np.asarray(history, float)
-    if not len(y) or not np.isfinite(y).all() or (y < 0).any():
-        raise ValueError('Historial inválido')
-    if method in ('TSB', 'SBA'):
-        value = predict_one(y, method, alpha)
-    elif method == 'Persistencia':
-        value = y[-1]
-    elif method.startswith('Media móvil'):
-        value = y[-int(method.split()[-1]):].mean()
-    elif method == 'Media histórica':
-        value = y.mean()
-    elif method == 'Dos etapas':
-        # Bernoulli MLE y media condicional: modelo hurdle intercept-only.
-        # Con pesos uniformes coincide con media histórica; se informa explícitamente.
-        value = (y > 0).mean() * (y[y > 0].mean() if (y > 0).any() else 0.)
-    else:
-        raise ValueError(method)
-    return np.repeat(float(value), int(horizon))
 
 
 @dataclass

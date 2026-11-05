@@ -209,6 +209,31 @@ def compare(candidates, y, start, end, train_reference, horizon=12):
     return pd.DataFrame(rows), pd.DataFrame(details)
 
 
+def compare_fixed_origin(candidates, y, origin, horizon, train_reference):
+    """Evalúa un único pronóstico completo desde el inicio de TEST.
+
+    No actualiza el historial con valores reales intermedios. Es la comparación
+    equivalente al plan operativo que se emite una sola vez para 12 semanas.
+    """
+    y = np.asarray(y, dtype=float)
+    origin, horizon = int(origin), int(horizon)
+    if origin < 1 or horizon < 2 or origin + horizon > len(y):
+        raise ValueError("No existe un bloque fijo completo para evaluar.")
+    actual = y[origin:origin+horizon]
+    rows, details = [], []
+    for name, candidate in candidates.items():
+        pred = recursive(candidate, y[:origin], horizon)
+        rows.append({"Modelo": name, "Orígenes": 1, "Horizonte": horizon,
+                     **metrics(actual, pred, train_reference)})
+        for h, (real, estimate) in enumerate(zip(actual, pred), start=1):
+            details.append({"Modelo": name, "origen": origin, "h": h,
+                            "indice": origin+h-1, "real": float(real),
+                            "prediccion": float(estimate)})
+    table = pd.DataFrame(rows).sort_values(
+        ["RMSE", "MAE", "Modelo"], kind="stable").reset_index(drop=True)
+    return table, pd.DataFrame(details)
+
+
 def choose_lstm(validation, candidates):
     """La demanda principal conserva una LSTM como exige el alcance de tesis."""
     eligible=[name for name,c in candidates.items() if c.model is not None]
@@ -289,9 +314,21 @@ def demand_from_fit(fit):
 def evaluate(selection):
     if selection['test'] is None:
         y = selection['series'].valor.to_numpy(float)
+        origin = int(selection['validation_end'])
         selection['test'], selection['test_predictions'] = compare(
-            selection['candidates'], y, selection['validation_end'], len(y),
-            y[:selection['train_end']])
+            selection['candidates'], y, origin, len(y), y[:selection['train_end']])
+        # A second, directly comparable evaluation: one untouched 12-week block
+        # from the first TEST origin, matching the previous fixed-horizon report.
+        horizon = 12
+        if len(y) - origin >= horizon:
+            selection['fixed_test'], selection['fixed_test_predictions'] = compare_fixed_origin(
+                selection['candidates'], y, origin, horizon, y[:selection['train_end']])
+            selection['fixed_test_origin_date'] = pd.Timestamp(
+                selection['series'].fecha_inicio.iloc[origin]).date()
+        else:
+            selection['fixed_test'] = pd.DataFrame()
+            selection['fixed_test_predictions'] = pd.DataFrame()
+            selection['fixed_test_origin_date'] = None
     return selection['test'].copy()
 
 

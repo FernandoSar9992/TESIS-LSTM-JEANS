@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from unittest.mock import patch
 from motor_lstm import extract_series, make_forecast_table
-from protocolo_final import confirm_pre_sales, origins, baseline, recursive, Candidate, select, evaluate, future, choose_lstm
+from protocolo_final import confirm_pre_sales, origins, baseline, recursive, Candidate, select, evaluate, future, choose_lstm, compare_fixed_origin
 
 
 class ProtocolTests(unittest.TestCase):
@@ -89,6 +89,21 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             origins(70, 78, 12)
 
+    def test_fixed_origin_uses_one_uninterrupted_12_week_block(self):
+        class Net:
+            def __call__(self, x, training=False):
+                return np.array([[x[0, -1, 0]]])
+        y=np.arange(1,41,dtype=float)
+        c=Candidate("original",Net(),0.,1.,2,1)
+        table,detail=compare_fixed_origin({"LSTM":c},y,20,12,y[:20])
+        self.assertEqual(int(table.iloc[0]["Orígenes"]),1)
+        self.assertEqual(int(table.iloc[0]["Horizonte"]),12)
+        self.assertEqual(len(detail),12)
+        self.assertEqual(detail["origen"].nunique(),1)
+        self.assertEqual(detail["indice"].tolist(),list(range(20,32)))
+        with self.assertRaises(ValueError):
+            compare_fixed_origin({"LSTM":c},y,35,12,y[:20])
+
     def test_two_stage_expectation_and_sba(self):
         y = np.array([100., 0, 0, 100, 0, 0])
         self.assertAlmostEqual(baseline(y, 'Dos etapas', 3)[0], 100/3)
@@ -108,6 +123,23 @@ class ProtocolTests(unittest.TestCase):
                                        ('Demanda de corte propio','demanda_cp',20),
                                        ('Producción de corte propio','produccion_cp',999)]}
         self.assertTrue(make_forecast_table(fs).demanda_total.eq(30).all())
+
+    def test_evaluate_reports_fixed_and_rolling_test_separately(self):
+        class Net:
+            def __call__(self, x, training=False):
+                return np.array([[float(x[0, -1, 0])]])
+        y=np.arange(1,101,dtype=float)
+        series=pd.DataFrame({"fecha_inicio":pd.date_range("2023-01-02",periods=100,freq="7D"),
+                             "valor":y})
+        c=Candidate("original",Net(),0.,1.,2,1)
+        selection={"series":series,"candidates":{"LSTM":c},
+                   "train_end":70,"validation_end":85,"test":None}
+        rolling=evaluate(selection)
+        self.assertEqual(len(rolling),1)
+        self.assertEqual(int(selection["fixed_test"].iloc[0]["Orígenes"]),1)
+        self.assertEqual(int(selection["fixed_test"].iloc[0]["Horizonte"]),12)
+        self.assertEqual(len(selection["fixed_test_predictions"]),12)
+        self.assertEqual(len(selection["test_predictions"]),4*12)
 
     def test_test_values_cannot_change_selection(self):
         class Net:

@@ -78,7 +78,7 @@ def search(series,production=False,settings=None,control=None,progress=None):
         result['original_demand_fit']=control['original_demand_fit']
     return result
 
-def select_frozen(series,spec,control):
+def select_frozen(series,spec,control,calibrate_bias=False):
     """Reproduce la decisión de desarrollo sin repetir la parrilla en Streamlit.
 
     El llamador debe verificar hash del archivo, ceros confirmados y configuración.
@@ -95,9 +95,21 @@ def select_frozen(series,spec,control):
     candidates={**control['candidates'],spec['selected']:c}
     table,detail=compare(candidates,y,tr,ve,y[:tr])
     table=table.sort_values(['RMSE','MAE','Modelo'],kind='stable').reset_index(drop=True)
+    # CP bias calibration estimated only from validation residuals; TEST remains untouched.
+    bias_correction=0.0
+    if calibrate_bias:
+        selected_detail=detail.loc[detail['Modelo']==spec['selected']]
+        if selected_detail.empty:
+            raise ValueError('No hay predicciones de validación para calibrar el sesgo CP.')
+        residual=(selected_detail['real']-selected_detail['prediccion']).to_numpy(float)
+        if not np.isfinite(residual).all():
+            raise ValueError('Los residuos de validación CP no son finitos.')
+        bias_correction=float(np.mean(residual))
+        c.bias_correction=bias_correction
     result={**control,'series':series.copy(),'selected':spec['selected'],'candidates':candidates,
             'best_comparison':str(table.iloc[0].Modelo),'validation':table,
             'validation_predictions':detail,'test':None,'horizon_search':True,
+            'bias_correction':bias_correction,
             'selection_policy':'Configuración congelada por validación recursiva a 12 semanas'}
     result.pop('original_demand_fit',None)
     result.pop('test_predictions',None)
@@ -115,6 +127,8 @@ def future_search(selection,first_plan,weeks=12,refit=False):
         raise ValueError('Fecha u horizonte inválido')
     c=selection['candidates'][selection['selected']]
     y=s.valor.to_numpy(float)
-    if refit: c=train_fixed(y,c.kind,c.settings,c.epochs)
+    if refit:
+        c=train_fixed(y,c.kind,c.settings,c.epochs)
+        c.bias_correction=float(selection.get('bias_correction',0.0))
     pred=recursive(c,y,weeks+days//7)[days//7:]
     return pd.DataFrame({'fecha_inicio':pd.date_range(first_plan,periods=weeks,freq='7D'),'pronostico':pred})

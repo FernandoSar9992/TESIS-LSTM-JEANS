@@ -16,7 +16,7 @@ class DirectHorizonTests(unittest.TestCase):
         self.assertEqual(y.shape, (11, 12))
         # Last target of last training window is index 29, never 30 or later.
         self.assertEqual(y[-1, -1], 29)
-        self.assertEqual(x[-1, -1, 0], 21)
+        self.assertEqual(x[-1, -1, 0], 17)
 
     def test_direct_prediction_emits_all_horizons_at_once(self):
         class Net:

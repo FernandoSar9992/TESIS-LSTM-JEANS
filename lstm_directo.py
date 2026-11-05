@@ -99,7 +99,7 @@ def select_direct(series, settings=None, control=None, progress=None, horizon=HO
         residual = (selected_rows["real"]-selected_rows["prediccion"]).to_numpy(dtype=float)
         if not len(residual) or not np.isfinite(residual).all():
             raise ValueError("No hay residuos finitos de VALIDACIÓN para calibrar el sesgo.")
-        bias_correction = float(np.mean(residual))
+        bias_correction = float(candidates[selected].bias_correction) + float(np.mean(residual))
         candidates[selected].bias_correction = bias_correction
     kept = {k:v for k,v in candidates.items()
             if k == selected or not (k.startswith("H12 LSTM directa") and k != selected)}

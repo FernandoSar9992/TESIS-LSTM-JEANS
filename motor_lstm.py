@@ -217,7 +217,7 @@ def _make_lstm(units: int, lookback: int, dropout: float, seed: int):
 class Settings:
     lookback: int = 12
     epochs: int = 100
-    units: int = 24
+    units: int = 16
     batch_size: int = 16
     patience: int = 12
     train_ratio: float = 0.70

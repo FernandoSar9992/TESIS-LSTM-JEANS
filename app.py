@@ -153,7 +153,7 @@ with t1:
                                                else select_protocol(frame,True,settings))
                                                for name,frame in series.items()}
                 if use_validated:
-                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p)
+                    st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'))
                                                   for name,p in st.session_state['protocols'].items()}
             st.success("Entrenamiento y validación completados.")
         except ImportError as e:
@@ -177,6 +177,9 @@ with t2:
             st.caption("Se muestra el resultado del modelo LSTM que genera el pronóstico. Las comparaciones con métodos sencillos se conservan en el anexo técnico para justificar la elección; no se usan datos de prueba para seleccionar.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
+                if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:
+                    st.caption("Calibración aditiva CP estimada exclusivamente con residuos de VALIDACIÓN: "+
+                               format(protocol['bias_correction'],"+.2f")+" pantalones/semana. La tabla de validación conserva métricas sin calibrar; PRUEBA evalúa la corrección sin reajustarla.")
                 if protocol.get('best_comparison')!=protocol['selected']:
                     st.info("La comparación de validación favorece a "+protocol['best_comparison']+". Se mantiene LSTM por el alcance de la tesis; no se afirma superioridad.")
                 selected_validation=protocol['validation'].loc[

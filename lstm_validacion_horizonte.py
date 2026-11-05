@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from motor_lstm import Settings, _xy
 from protocolo_final import (Candidate, encode, _network, _dataset, compare,
-                              choose_lstm, origins, recursive, future)
+                              choose_lstm, choose_best, origins, recursive, future)
 
 GRID_EPOCHS=(10,30,60,100)
 
@@ -78,7 +78,7 @@ def search(series,production=False,settings=None,control=None,progress=None):
         result['original_demand_fit']=control['original_demand_fit']
     return result
 
-def select_frozen(series,spec,control,calibrate_bias=False):
+def select_frozen(series,spec,control,calibrate_bias=False,allow_statistical=False):
     """Reproduce la decisión de desarrollo sin repetir la parrilla en Streamlit.
 
     El llamador debe verificar hash del archivo, ceros confirmados y configuración.
@@ -95,6 +95,7 @@ def select_frozen(series,spec,control,calibrate_bias=False):
     candidates={**control['candidates'],spec['selected']:c}
     table,detail=compare(candidates,y,tr,ve,y[:tr])
     table=table.sort_values(['RMSE','MAE','Modelo'],kind='stable').reset_index(drop=True)
+    selected = choose_best(table,candidates) if allow_statistical else choose_lstm(table,candidates)
     # CP bias calibration estimated only from validation residuals; TEST remains untouched.
     bias_correction=0.0
     if calibrate_bias:
@@ -106,11 +107,12 @@ def select_frozen(series,spec,control,calibrate_bias=False):
             raise ValueError('Los residuos de validación CP no son finitos.')
         bias_correction=float(np.mean(residual))
         c.bias_correction=bias_correction
-    result={**control,'series':series.copy(),'selected':spec['selected'],'candidates':candidates,
+    result={**control,'series':series.copy(),'selected':selected,'candidates':candidates,
             'best_comparison':str(table.iloc[0].Modelo),'validation':table,
             'validation_predictions':detail,'test':None,'horizon_search':True,
-            'bias_correction':bias_correction,
-            'selection_policy':'Configuración congelada por validación recursiva a 12 semanas'}
+            'bias_correction':bias_correction,'allow_baseline_forecast':bool(allow_statistical),
+            'selection_policy':('Mejor RMSE de VALIDACIÓN entre LSTM Hurdle y referencias estadísticas'
+                                if allow_statistical else 'Configuración congelada por validación recursiva a 12 semanas')}
     result.pop('original_demand_fit',None)
     result.pop('test_predictions',None)
     return result

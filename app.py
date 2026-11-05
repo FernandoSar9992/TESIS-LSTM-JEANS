@@ -23,6 +23,7 @@ from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_te
 from planificacion_reposicion import calcular_plan_reposicion
 from capacidad_recursos import read_capacity, loads as resource_loads
 from lstm_validacion_horizonte import select_frozen, future_search
+from lstm_directo import select_direct
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
                                      forecast_future as forecast_intermitente)
 from protocolo_final import (confirm_pre_sales, select as select_protocol,
@@ -31,7 +32,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v4 · LSTM evaluadas a 12 semanas · Capacidad compartida por recurso.")
+st.caption("Versión v5 · Comparación LSTM recursiva/directa a 12 semanas · Capacidad compartida por recurso.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -101,8 +102,10 @@ use_validated=st.checkbox('Usar configuración LSTM elegida por validación de 1
     value=profile_available,disabled=not profile_available,
     help='Disponible para la base auditada, con ceros iniciales confirmados y ajustes manuales por defecto. No garantiza alta precisión en las tres series.')
 if use_validated:
-    st.caption('Configuración congelada: 16 unidades; épocas elegidas por serie. No se repite la búsqueda en la app. El bloque de prueba ya fue observado en revisiones anteriores.')
-signature=sha256(b'lstm-horizonte-v4'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
+    st.caption('Configuración de referencia: 16 unidades; épocas previamente elegidas por serie. La app vuelve a comparar LSTM recursiva y directa usando únicamente VALIDACIÓN.')
+    if validated_config.get("test_previously_observed", False):
+        st.warning("Nota metodológica: el bloque TEST de esta base ya fue consultado en iteraciones anteriores. Se mantiene fuera de la selección actual, pero debe interpretarse como un holdout reutilizado, no como una evaluación completamente independiente o ciega.")
+signature=sha256(b'lstm-horizonte-v5-direct'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -155,7 +158,15 @@ with t1:
                 if use_validated:
                     st.session_state['protocols']={name:select_frozen(series[name],validated_config['models'][name],p,calibrate_bias=(name=='Demanda de corte propio'))
                                                   for name,p in st.session_state['protocols'].items()}
-            st.success("Entrenamiento y validación completados.")
+                # Experimento predefinido: comparar LSTM recursiva y directa
+                # con los mismos orígenes temporales de VALIDACIÓN.
+                with st.spinner("Comparando LSTM recursiva y directa a 12 semanas; puede tardar unos minutos..."):
+                    for name in ("Demanda de maquila", "Demanda de corte propio"):
+                        st.session_state['protocols'][name]=select_direct(
+                            series[name], settings,
+                            control=st.session_state['protocols'][name],
+                            calibrate_bias=(name=="Demanda de corte propio"))
+            st.success("Entrenamiento y comparación temporal completados.")
         except ImportError as e:
             st.session_state.pop("fits",None)
             st.session_state.pop("protocols",None)
@@ -174,7 +185,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Se muestra el resultado del modelo LSTM que genera el pronóstico. Las comparaciones con métodos sencillos se conservan en el anexo técnico para justificar la elección; no se usan datos de prueba para seleccionar.")
+            st.caption("Se comparan LSTM recursivas y directas de 12 semanas mediante VALIDACIÓN temporal. La arquitectura se selecciona sin consultar PRUEBA; los métodos sencillos permanecen como referencias.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:
@@ -185,7 +196,7 @@ with t2:
                 selected_validation=protocol['validation'].loc[
                     protocol['validation']['Modelo']==protocol['selected']]
                 st.dataframe(selected_validation.round(3),hide_index=True,use_container_width=True)
-            st.caption("Dos etapas usa probabilidad empírica × media positiva y coincide con media histórica. Las comparaciones anteriores a un paso se conservan debajo como diagnóstico.")
+            st.caption("La selección principal corresponde a una LSTM (recursiva o directa) elegida por RMSE de VALIDACIÓN a 12 semanas. Las comparaciones con referencias se conservan en el anexo técnico.")
         with st.expander("Anexo técnico: comparaciones y diagnóstico del motor anterior",expanded=False):
             st.subheader("Diagnóstico del motor anterior: validación de demanda")
             rows=[]

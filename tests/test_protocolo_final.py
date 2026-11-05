@@ -142,6 +142,22 @@ class ProtocolTests(unittest.TestCase):
         pd.testing.assert_frame_equal(p['test'],original_test)
         self.assertTrue(result.pronostico.eq(20.).all())
 
+
+    def test_generic_refit_preserves_cp_bias_correction(self):
+        from motor_lstm import Settings
+        class Net:
+            def __call__(self,x,training=False):
+                return np.zeros((len(x),1))
+        s=pd.DataFrame({'fecha_inicio':pd.date_range('2024-01-01',periods=100,freq='7D'),
+                        'valor':np.arange(100,dtype=float)+20})
+        c=Candidate('log',Net(),0.,1.,12,7,settings=Settings(),bias_correction=6.5)
+        p={'series':s,'test':pd.DataFrame({'RMSE':[12.]}),'selected':'fixed',
+           'candidates':{'fixed':c}}
+        with patch('protocolo_final.train_candidate',
+                   return_value=Candidate('log',Net(),0.,1.,12,7,settings=Settings())):
+            result=future(p,s.fecha_inicio.iloc[-1]+pd.Timedelta(days=7))
+        self.assertTrue((result.pronostico>=6.5).all())
+
     def test_planning_ignores_statistical_production_and_respects_capacity(self):
         from planificacion_reposicion import calcular_plan_reposicion
         data = pd.DataFrame({'fecha_inicio':pd.date_range('2026-11-02',periods=12,freq='7D'),

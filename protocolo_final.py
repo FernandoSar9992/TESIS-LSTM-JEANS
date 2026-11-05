@@ -61,26 +61,65 @@ class Candidate:
     alpha: float = .1
     settings: object = None
     bias_correction: float = 0.
+    strategy: str = 'recursive'
+    output_horizon: int = 12
 
 
 def encode(y, c):
-    a = np.log1p(y) if c.kind == 'log' else np.asarray(y, float)
+    a = np.log1p(y) if c.kind in ('log', 'direct') else np.asarray(y, float)
     return (a-c.mean)/c.std
 
 
 def decode(z, c):
     a = np.asarray(z, float)*c.std+c.mean
-    if c.kind == 'log':
+    if c.kind in ('log', 'direct'):
         a = np.exp(np.clip(a, -20, 20))*c.smear-1
     return np.maximum(0., a)
 
 
 def recursive(c, history, horizon):
+    """Genera un horizonte con estrategia recursiva o directa por bloques."""
+    horizon = int(horizon)
+    if horizon < 1:
+        raise ValueError('El horizonte debe ser positivo.')
+    history = np.asarray(history, dtype=float).reshape(-1)
     if c.model is None:
         return baseline(history, c.kind, horizon, c.alpha)
-    window = list(encode(np.asarray(history, float)[-c.lookback:], c))
+    if len(history) < int(c.lookback):
+        raise ValueError('El historial es menor que la ventana de entrada del modelo.')
+    if not np.isfinite(history).all() or (history < 0).any():
+        raise ValueError('El historial contiene cantidades inválidas.')
+
+    if c.strategy == 'direct':
+        if int(c.output_horizon) < 1:
+            raise ValueError('La salida multi-horizonte debe ser positiva.')
+        context = history.tolist()
+        result = []
+        while len(result) < horizon:
+            x = np.asarray(encode(np.asarray(context[-c.lookback:], dtype=float), c),
+                           dtype='float32').reshape(1, c.lookback, 1)
+            raw = np.asarray(c.model(x, training=False), dtype=float).reshape(-1)
+            if len(raw) != int(c.output_horizon):
+                raise ValueError(
+                    f'La LSTM directa debe devolver {c.output_horizon} valores; devolvió {len(raw)}.'
+                )
+            block = np.maximum(
+                0.0, np.asarray(decode(raw, c), dtype=float) + float(c.bias_correction)
+            )
+            if not np.isfinite(block).all():
+                raise ValueError('Pronóstico directo no finito.')
+            take = min(int(c.output_horizon), horizon - len(result))
+            emitted = block[:take].tolist()
+            result.extend(emitted)
+            # Para horizontes mayores que la salida entrenada, se avanza por bloques.
+            context.extend(emitted)
+        return np.asarray(result, dtype=float)
+
+    if c.strategy != 'recursive':
+        raise ValueError(f'Estrategia de pronóstico desconocida: {c.strategy}')
+    window = list(encode(history[-c.lookback:], c))
     result = []
-    for _ in range(int(horizon)):
+    for _ in range(horizon):
         x = np.array(window[-c.lookback:], dtype='float32').reshape(1, c.lookback, 1)
         z = float(np.asarray(c.model(x, training=False))[0, 0])
         value = max(0., float(decode(z, c)) + float(c.bias_correction))
@@ -89,7 +128,7 @@ def recursive(c, history, horizon):
         result.append(value)
         # Feed the forecast actually emitted (including clipping/retransformation).
         window.append(float(encode(value, c)))
-    return np.asarray(result)
+    return np.asarray(result, dtype=float)
 
 
 def _network(kind, settings):
@@ -262,7 +301,8 @@ def future(selection, first_plan, weeks=12, refit=True):
         return result
     if refit and c.model is not None:
         # New object: evaluation network, scaling and metrics remain untouched.
-        c = replace(train_candidate(y, c.kind, c.settings, c.epochs), smear=c.smear)
+        c = replace(train_candidate(y, c.kind, c.settings, c.epochs),
+                    smear=c.smear, bias_correction=c.bias_correction)
     bridge = days//7
     pred = recursive(c, y, weeks+bridge)[bridge:]
     return pd.DataFrame({'fecha_inicio': pd.date_range(first_plan, periods=weeks, freq='7D'),

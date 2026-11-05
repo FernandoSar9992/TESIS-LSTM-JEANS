@@ -27,3 +27,4 @@ jobs:
           python -m unittest discover -s tests -p "test_capacidad_recursos.py" -v
           python -m unittest discover -s tests -p "test_capacity_priority_residual.py" -v
           python -m unittest discover -s tests -p "test_lstm_horizonte.py" -v
+          python -m unittest discover -s tests -p "test_lstm_directo.py" -v

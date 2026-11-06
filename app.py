@@ -32,7 +32,7 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
 st.title("Pronóstico semanal de demanda y producción de jeans")
 st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v8 · LSTM residual estacional de 52 semanas · Ensemble de tres semillas · Evaluación fija y rolling de 12 semanas.")
+st.caption("Versión v9 · LSTM directa multihorizonte con contexto estacional · Tres semillas · Evaluación fija y rolling de 12 semanas.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
@@ -106,7 +106,7 @@ if use_validated:
     st.caption('El perfil histórico se conserva como diagnóstico. Las demandas principales usan la LSTM residual estacional v8 y se seleccionan exclusivamente con VALIDACIÓN.')
     if validated_config.get("test_previously_observed", False):
         st.warning("Nota metodológica: el bloque TEST de esta base ya fue consultado en iteraciones anteriores. Se mantiene fuera de la selección actual, pero debe interpretarse como un holdout reutilizado, no como una evaluación completamente independiente o ciega.")
-signature=sha256(b'lstm-horizonte-v5-direct'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
+signature=sha256(b'lstm-v9-directa-contexto'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -142,7 +142,7 @@ with st.expander("Datos y trazabilidad"):
 t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
 with t1:
     st.subheader("Entrenar LSTM de demanda y producción")
-    st.write("Las demandas se modelan por separado con una LSTM residual estacional: aprende desviaciones respecto al valor de hace 52 semanas en escala log1p. Se promedian tres semillas y se evalúan pronósticos de 12 semanas. La producción CP histórica permanece como análisis complementario.")
+    st.write("Las demandas se modelan con una LSTM directa de 12 horizontes, contexto estacional de 52 semanas y tres semillas. Se comparan dos arquitecturas mediante VALIDACIÓN y se calibra el sesgo exclusivamente con ese bloque. Producción CP es un análisis complementario.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
         for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
             st.session_state.pop(k,None)
@@ -168,13 +168,14 @@ with t1:
                         select_frozen(series[name],validated_config['models'][name],p,
                                       calibrate_bias=False,allow_statistical=True))
                         for name,p in st.session_state['protocols'].items()}
-                # LSTM residual estacional: aprende la desviación frente al mismo
-                # período de hace 52 semanas. Cada origen se entrena solo con su pasado.
-                with st.spinner("Entrenando y validando LSTM residual estacional a 12 semanas..."):
+                # Modelo principal V9: predicción directa sin propagación recursiva.
+                with st.spinner("Seleccionando LSTM directa con validación temporal..."):
+                    status=st.empty()
                     for name in ("Demanda de maquila", "Demanda de corte propio"):
                         st.session_state['protocols'][name]=select_seasonal_residual(
                             series[name], settings=settings,
-                            progress=lambda msg: st.write(msg))
+                            progress=lambda msg: status.info(name+" · "+msg))
+                    status.empty()
             st.success("Entrenamiento y comparación temporal completados.")
         except ImportError as e:
             st.session_state.pop("fits",None)
@@ -194,12 +195,17 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Las demandas usan una LSTM residual estacional de 52 semanas, seleccionada y evaluada con orígenes cronológicos de VALIDACIÓN. Se muestran referencias estacionales de 48 y 52 semanas. La producción CP, si se activa, permanece como análisis complementario.")
+            st.caption("Las demandas usan LSTM directa multihorizonte con contexto estacional. La arquitectura, épocas y calibración se determinan antes de TEST. Se comparan referencias de 48 y 52 semanas; producción CP sigue siendo complementaria.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
-                if name=="Demanda de corte propio" and protocol.get('bias_correction',0.0)!=0:
-                    st.caption("Calibración aditiva CP estimada exclusivamente con residuos de VALIDACIÓN: "+
-                               format(protocol['bias_correction'],"+.2f")+" pantalones/semana. La tabla de validación conserva métricas sin calibrar; PRUEBA evalúa la corrección sin reajustarla.")
+                if name.startswith("Demanda"):
+                    st.caption("Sesgo corregido usando VALIDACIÓN: "
+                        +format(protocol.get('bias_correction',0.0),"+.2f")
+                        +" unidades/semana. La tabla de selección es sin calibrar; la calibración se muestra aparte.")
+                    calibrated=protocol.get('validation_calibrated')
+                    if calibrated is not None:
+                        st.markdown("**VALIDACIÓN después de calibración (resultado de desarrollo)**")
+                        st.dataframe(calibrated.round(3),hide_index=True,use_container_width=True)
                 if protocol.get('best_comparison')!=protocol['selected']:
                     st.info("La comparación de validación favorece a "+protocol['best_comparison']+". Se mantiene LSTM por el alcance de la tesis; no se afirma superioridad.")
                 selected_validation=protocol['validation'].loc[
@@ -302,11 +308,14 @@ with t3:
                         st.markdown("**Evaluación fija: un único pronóstico de 12 semanas desde el inicio de TEST**")
                         st.caption("Origen: "+str(protocol.get("fixed_test_origin_date"))+
                                    ". No se incorporan ventas reales intermedias. Esta prueba es comparable con el diagnóstico anterior de primer origen.")
-                        keep=[protocol["selected"],protocol.get("best_comparison"),"LSTM demanda original"]
-                        keep=list(dict.fromkeys(x for x in keep if x))
-                        fixed_show=fixed.loc[fixed["Modelo"].isin(keep)]
-                        if fixed_show.empty:
-                            fixed_show=fixed.head(5)
+                        if name.startswith("Demanda"):
+                            fixed_show=fixed
+                        else:
+                            keep=[protocol["selected"],protocol.get("best_comparison"),"LSTM demanda original"]
+                            keep=list(dict.fromkeys(x for x in keep if x))
+                            fixed_show=fixed.loc[fixed["Modelo"].isin(keep)]
+                            if fixed_show.empty:
+                                fixed_show=fixed.head(5)
                         st.dataframe(fixed_show.round(3),hide_index=True,use_container_width=True)
             with st.expander("Anexo técnico: diagnóstico del motor anterior y referencias de prueba",expanded=False):
                     main_rows=[]
@@ -358,7 +367,11 @@ with t4:
             st.session_state.pop('plan_preliminar',None)
         if protocols:
             for name,protocol in protocols.items():
-                mode=". Reajuste final con todo el historial y épocas congeladas." if (not name.startswith('Demanda') or refit_demands) else ". Pesos y escala originales; recursión sin valores reales futuros."
+                mode=(". LSTM directa de 12 semanas, parámetros congelados. Reajuste final."
+                      if name.startswith('Demanda') and refit_demands else
+                      ". LSTM directa con pesos seleccionados en VALIDACIÓN."
+                      if name.startswith('Demanda') else
+                      ". Producción CP: estimación descriptiva, no una orden de fabricación.")
                 st.caption(name+": "+protocol['selected']+mode)
         elif selection:
             st.caption("Demanda CP: "+selection.method+" (elegido en validación del horizonte). Demanda MQ: LSTM.")
@@ -372,7 +385,7 @@ with t4:
                 forecasts={}
                 for name,fit in fits.items():
                     if protocols:
-                        forecasts[name]=(future_seasonal_residual(protocols[name],start,int(weeks),refit=True) if name.startswith('Demanda') else future_search(protocols[name],start,int(weeks),refit=True)).rename(columns={'pronostico':fit.target})
+                        forecasts[name]=(future_seasonal_residual(protocols[name],start,int(weeks),refit=refit_demands) if name.startswith('Demanda') else future_search(protocols[name],start,int(weeks),refit=True)).rename(columns={'pronostico':fit.target})
                     elif name=="Demanda de corte propio" and selection:
                         forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
                     elif name=="Producción de corte propio" and st.session_state.get("cp_choice") is not None and st.session_state["cp_choice"].method!="LSTM original":
@@ -477,9 +490,17 @@ with t4:
                     if protocols:
                         pd.concat([p['validation'].assign(Serie=n) for n,p in protocols.items()]).to_excel(writer,sheet_name="VALIDACION_12",index=False)
                         pd.concat([(evaluate_seasonal_residual(p) if n.startswith('Demanda') else evaluate_protocol(p)).assign(Serie=n) for n,p in protocols.items()]).to_excel(writer,sheet_name="PRUEBA_12",index=False)
+                        calibrated_val=[p['validation_calibrated'].assign(Serie=n) for n,p in protocols.items()
+                                        if n.startswith('Demanda') and 'validation_calibrated' in p]
+                        if calibrated_val:
+                            pd.concat(calibrated_val).to_excel(writer,sheet_name="VALIDACION_CALIBRADA",index=False)
+                        detail_test=[p['test_predictions'].assign(Serie=n) for n,p in protocols.items()
+                                     if n.startswith('Demanda') and 'test_predictions' in p]
+                        if detail_test:
+                            pd.concat(detail_test).to_excel(writer,sheet_name="TRAZA_TEST_12",index=False)
                         pd.DataFrame([{'Serie':n,'Modelo':p['selected'],'Epocas':p['candidates'][p['selected']].epochs,
-                                       'Smearing':p['candidates'][p['selected']].smear,'Criterio':'RMSE a 12 semanas',
-                                       'Refit':('Todo el historial, después de prueba' if not n.startswith('Demanda') or refit_demands else 'Sin reajuste; pesos y escala evaluados')} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
+                                       'Smearing':p['candidates'][p['selected']].smear,'Sesgo_validacion':p.get('bias_correction',0.0),'Criterio':'RMSE de VALIDACIÓN a 12 semanas',
+                                       'Refit':('Todo el historial, configuración congelada' if not n.startswith('Demanda') or refit_demands else 'Pesos elegidos en validación')} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
                     if plan is not None:
                         plan.to_excel(writer,sheet_name="PLAN_REPOSICION",index=False)
                         if resources is not None:

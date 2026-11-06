@@ -5,8 +5,11 @@ os.environ.setdefault("KERAS_BACKEND", "tensorflow")
 os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "1")
 os.environ.setdefault("TF_NUM_INTEROP_THREADS", "1")
 
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import numpy as np
-import pandas as pd
 import tensorflow as tf
 
 from lstm_residual_estacional import _fit_member, _predict_members, _training_pairs

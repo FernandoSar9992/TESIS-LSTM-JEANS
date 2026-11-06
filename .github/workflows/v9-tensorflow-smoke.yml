@@ -1,0 +1,28 @@
+name: Smoke TensorFlow V9
+
+on:
+  push:
+    branches:
+      - v9-lstm-directo-contexto-20261106
+  pull_request:
+    branches:
+      - lstm-produccion-final
+
+jobs:
+  tensorflow-v9:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar TensorFlow y dependencias mínimas
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy>=1.26,<3" "pandas>=2.2,<3" "tensorflow-cpu==2.20.0"
+      - name: Entrenar modelo sintético y verificar 12 predicciones causales
+        env:
+          KERAS_BACKEND: tensorflow
+          TF_CPP_MIN_LOG_LEVEL: "2"
+        run: python scripts/smoke_v9_tensorflow.py

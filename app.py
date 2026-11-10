@@ -37,6 +37,10 @@ password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
 
+# Acceso visible aunque Streamlit oculte la navegación de páginas en la barra lateral.
+st.page_link("pages/5_Validacion_Cruzada_V9.py",
+             label="🧪 Abrir validación cruzada y diagnóstico de sobreajuste V9")
+
 with st.sidebar:
     st.header("Configuración")
     weeks=st.number_input("Semanas del pronóstico",min_value=1,max_value=26,value=12,step=1)

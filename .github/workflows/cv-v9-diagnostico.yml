@@ -1,0 +1,25 @@
+name: Validacion cruzada V9 - integridad temporal
+
+on:
+  push:
+    branches:
+      - diagnostico-cross-validation-v9-20261110
+  workflow_dispatch:
+
+jobs:
+  pruebas-cv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias para tests
+        run: python -m pip install 'numpy>=1.26,<3' 'pandas>=2.2,<3'
+      - name: Compilar el módulo y la página de auditoría
+        run: |
+          python -m py_compile cv_v9_diagnostico.py
+          python -m py_compile pages/5_Validacion_Cruzada_V9.py
+          python -m py_compile tests/test_cv_v9_diagnostico.py
+      - name: Pruebas sin TensorFlow (causalidad y folds)
+        run: python -m unittest discover -s tests -p 'test_cv_v9_diagnostico.py' -v

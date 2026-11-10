@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from ui_tesis import install_theme, hero_main, ribbon
+from ui_tesis import install_theme
+from cv_v9_panel import render_cv_tab
 from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,audit_inventory,extract_series,fit_one,
                          final_test,recursive_test,make_forecast_table)
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
@@ -32,19 +33,11 @@ from protocolo_final import (confirm_pre_sales, select as select_protocol,
 
 st.set_page_config(page_title="TESIS | Pronóstico de jeans V9",page_icon="📈",layout="wide")
 install_theme()
-hero_main()
-ribbon("Modelo V9 preservado", "La auditoría de validación cruzada corre de forma independiente. La arquitectura, el entrenamiento y la lógica del pronóstico original no han sido modificados.")
+st.title("Pronóstico semanal de demanda y producción de jeans")
+st.caption("LSTM V9 · Maquila y corte propio · Validación temporal, diagnóstico y planificación productiva")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
-
-# Acceso visible aunque Streamlit oculte la navegación de páginas en la barra lateral.
-st.page_link("pages/5_Validacion_Cruzada_V9.py",
-             label="🧪 Validación cruzada · ejecutar auditoría V9",
-             use_container_width=True)
-st.page_link("pages/6_Informe_Academico_V9.py",
-             label="📊 Informe académico V9 · resultados para el tutor",
-             use_container_width=True)
 
 with st.sidebar:
     st.header("Configuración")
@@ -148,7 +141,7 @@ with st.expander("Datos y trazabilidad"):
     if info["diferencias_en_total_archivo"]:
         st.warning("El campo de producción total del archivo difiere de la suma MQ+CP en "+str(info["diferencias_en_total_archivo"])+" semanas.")
 
-t1,t2,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Prueba","4. Pronóstico y Excel"])
+t1,t2,t_cv,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Validación cruzada","4. Prueba","5. Pronóstico y Excel"])
 with t1:
     st.subheader("Entrenar LSTM de demanda y producción")
     st.write("Las demandas se modelan con una LSTM directa de 12 horizontes, contexto estacional de 52 semanas y tres semillas. Se comparan dos arquitecturas mediante VALIDACIÓN y se calibra el sesgo exclusivamente con ese bloque. Producción CP es un análisis complementario.")
@@ -263,6 +256,9 @@ with t2:
                     st.dataframe(st.session_state["cp_choice"].comparison.round(3),hide_index=True,use_container_width=True)
                 loss=f.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
                 st.line_chart(loss)
+
+with t_cv:
+    render_cv_tab(series, settings, source_digest, confirm_zeros, weeks)
 
 with t3:
     if not fits:

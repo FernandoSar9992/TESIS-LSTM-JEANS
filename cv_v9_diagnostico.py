@@ -54,7 +54,7 @@ class AuditConfig:
 
 
 def expanding_folds(n, train_ratio=.70, val_ratio=.15, horizon=12,
-                    max_folds=3, min_train=96):
+                    max_folds=3, min_train=84):
     """Ventanas de evaluación completas, contiguas, sin incluir TEST.
 
     Devuelve pares (origen, fin_exclusivo). Cada objetivo es disjunto.

@@ -15,10 +15,13 @@ import streamlit as st
 from motor_lstm import prepare_base, extract_series
 from protocolo_final import confirm_pre_sales
 from cv_v9_diagnostico import AuditConfig, expanding_folds, evaluate_cross_validation
+from ui_tesis import install_theme, hero_audit, note, ribbon, kpis
 
 
-st.set_page_config(page_title="Validación cruzada V9", page_icon="🧪", layout="wide")
-st.title("Validación cruzada y diagnóstico de sobreajuste · LSTM V9")
+st.set_page_config(page_title="TESIS | Auditoría V9", page_icon="🧪", layout="wide")
+install_theme()
+hero_audit()
+ribbon("Diagnóstico metodológico", "La auditoría vuelve a entrenar copias temporales de V9. No sustituye la LSTM utilizada en planificación.")
 st.info(
     "Auditoría independiente: se entrena una copia de la arquitectura V9 en cada "
     "fold. NO se cambian la V9 original, sus hiperparámetros, sus predicciones "
@@ -144,6 +147,16 @@ if st.session_state.get("cv_v9_signature") != signature:
     st.stop()
 
 result = st.session_state["cv_v9_result"]
+st.subheader("Indicadores de generalización")
+summary_row = result["summary"].iloc[0]
+kpis([
+    ("Particiones evaluadas", int(summary_row["Folds"]), "Ventana expansiva sin objetivos solapados"),
+    ("RMSE medio", f"{float(summary_row['Promedio_RMSE_LSTM']):.2f}", "Unidades de demanda por semana"),
+    ("MAE medio", f"{float(summary_row['Promedio_MAE_LSTM']):.2f}", "Error absoluto medio"),
+    ("Dispersión RMSE", f"{float(summary_row['Desviacion_RMSE_folds']):.2f}", "Desviación entre folds"),
+    ("Folds favorables", f"{int(summary_row['Folds_superados_por_LSTM'])}/{int(summary_row['Folds'])}", "Mejor RMSE que Naive 48 y 52"),
+    ("TEST del diagnóstico", "Reservado", "No interviene en este proceso"),
+])
 st.subheader("Resultados de cada fold (12 semanas sin actualizar objetivos)")
 st.dataframe(result["folds"], hide_index=True, use_container_width=True)
 st.subheader("Resumen de estabilidad")

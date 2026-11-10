@@ -1,0 +1,85 @@
+{
+  "version": "V9 · evaluación temporal 12 semanas",
+  "fecha_analisis": "2026-11-10",
+  "origen": "Exportaciones CV_V9_MQ.xlsx y CV_V9_CP.xlsx aportadas por el investigador",
+  "nota": "Estos resultados no sustituyen una validación independiente sobre semanas de demanda completamente observadas. TEST no fue utilizado por la auditoría CV, pero el bloque TEST original ya había sido consultado durante el desarrollo.",
+  "modalidades": {
+    "MQ": {
+      "nombre": "Maquila",
+      "n_folds": 3,
+      "semanas": 36,
+      "MAE_medio": 17.5154,
+      "RMSE_medio": 21.0189,
+      "desviacion_RMSE": 3.4485,
+      "supera_ambas": 1,
+      "folds": [
+        {
+          "fold": 1,
+          "desde": "2025-07-28",
+          "hasta": "2025-10-13",
+          "mae": 11.634,
+          "rmse": 16.175,
+          "r2": -1.5645,
+          "sesgo": 11.0254,
+          "naive48": 32.9634,
+          "naive52": 41.4839
+        },
+        {
+          "fold": 2,
+          "desde": "2025-10-20",
+          "hasta": "2026-01-05",
+          "mae": 21.8155,
+          "rmse": 22.9504,
+          "r2": 0.672,
+          "sesgo": 21.8155,
+          "naive48": 20.0271,
+          "naive52": 31.4351
+        },
+        {
+          "fold": 3,
+          "desde": "2026-01-12",
+          "hasta": "2026-03-30",
+          "mae": 19.0967,
+          "rmse": 23.9314,
+          "r2": -1.2256,
+          "sesgo": 18.0124,
+          "naive48": 39.5,
+          "naive52": 21.6968
+        }
+      ]
+    },
+    "CP": {
+      "nombre": "Corte propio",
+      "n_folds": 2,
+      "semanas": 24,
+      "MAE_medio": 7.7323,
+      "RMSE_medio": 8.8625,
+      "desviacion_RMSE": 1.8503,
+      "supera_ambas": 2,
+      "folds": [
+        {
+          "fold": 1,
+          "desde": "2025-12-29",
+          "hasta": "2026-03-16",
+          "mae": 9.3675,
+          "rmse": 10.7128,
+          "r2": 0.5856,
+          "sesgo": -4.2312,
+          "naive48": 15.559,
+          "naive52": 12.9067
+        },
+        {
+          "fold": 2,
+          "desde": "2026-03-23",
+          "hasta": "2026-06-08",
+          "mae": 6.097,
+          "rmse": 7.0123,
+          "r2": 0.3751,
+          "sesgo": 4.8675,
+          "naive48": 19.9311,
+          "naive52": 8.0467
+        }
+      ]
+    }
+  }
+}

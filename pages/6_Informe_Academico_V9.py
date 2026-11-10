@@ -219,10 +219,9 @@ with tab_caveats:
         "No se realizaron nuevos entrenamientos en esta página: sus valores "
         "proceden exclusivamente de los Excel de auditoría entregados."
     )
-    st.page_link(
-        "pages/5_Validacion_Cruzada_V9.py",
-        label="🧪 Ejecutar nuevamente la auditoría con datos actualizados",
-        use_container_width=True
+    st.info(
+        "Para ejecutar nuevamente la auditoría con una base actualizada, "
+        "abre «Validacion Cruzada V9» en el menú lateral de Streamlit."
     )
 
 with tab_data:

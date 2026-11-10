@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from ui_tesis import install_theme, hero_main, ribbon
 from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,audit_inventory,extract_series,fit_one,
                          final_test,recursive_test,make_forecast_table)
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
@@ -29,17 +30,21 @@ from produccion_intermitente import (select_by_validation,evaluate_test as test_
 from protocolo_final import (confirm_pre_sales, select as select_protocol,
                              evaluate as evaluate_protocol, future as future_protocol, demand_from_fit)
 
-st.set_page_config(page_title="Planificación de jeans | Pronóstico LSTM",page_icon="📈",layout="wide")
-st.title("Pronóstico semanal de demanda y producción de jeans")
-st.caption("Demanda MQ y CP · Producción CP estimada · Evaluación temporal · Planificación agregada y PMP")
-st.caption("Versión v9 · LSTM directa multihorizonte con contexto estacional · Tres semillas · Evaluación fija y rolling de 12 semanas.")
+st.set_page_config(page_title="TESIS | Pronóstico de jeans V9",page_icon="📈",layout="wide")
+install_theme()
+hero_main()
+ribbon("Modelo V9 preservado", "La auditoría de validación cruzada corre de forma independiente. La arquitectura, el entrenamiento y la lógica del pronóstico original no han sido modificados.")
 password=os.environ.get("TESIS_ACCESS_PASSWORD","").strip()
 if password and not hmac.compare_digest(st.text_input("Clave de acceso",type="password"),password):
     st.info("Introduce la clave de acceso."); st.stop()
 
 # Acceso visible aunque Streamlit oculte la navegación de páginas en la barra lateral.
 st.page_link("pages/5_Validacion_Cruzada_V9.py",
-             label="🧪 Abrir validación cruzada y diagnóstico de sobreajuste V9")
+             label="🧪 Validación cruzada · ejecutar auditoría V9",
+             use_container_width=True)
+st.page_link("pages/6_Informe_Academico_V9.py",
+             label="📊 Informe académico V9 · resultados para el tutor",
+             use_container_width=True)
 
 with st.sidebar:
     st.header("Configuración")

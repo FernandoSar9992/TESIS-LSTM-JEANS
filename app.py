@@ -22,8 +22,6 @@ from motor_lstm import (APP_TIMEZONE,Settings,prepare_base,audit_inventory,extra
                          final_test,recursive_test,make_forecast_table)
 from pronostico_horizonte import (select_demand_by_validation,evaluate_demand_test,
                                   forecast_lstm_verified,forecast_demand_selected)
-from planificacion_reposicion import calcular_plan_reposicion
-from capacidad_recursos import read_capacity, loads as resource_loads
 from lstm_validacion_horizonte import select_frozen, future_search
 from lstm_residual_estacional import (select_seasonal_residual, evaluate_seasonal_residual, future_seasonal_residual)
 from produccion_intermitente import (select_by_validation,evaluate_test as test_intermitente,
@@ -108,7 +106,7 @@ if use_validated:
 signature=sha256(b'lstm-v9-directa-contexto'+payload+repr(asdict(settings)).encode()+str((False,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
-    for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
+    for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols"):
         st.session_state.pop(k,None)
 forecast_key=(str(start),int(weeks))
 if st.session_state.get("forecast_key")!=forecast_key:
@@ -143,7 +141,7 @@ with t1:
     st.subheader("Entrenar LSTM de demanda")
     st.write("Las demandas se modelan con una LSTM directa de 12 horizontes, contexto estacional de 52 semanas y tres semillas. Se comparan dos arquitecturas mediante VALIDACIÓN y se calibra el sesgo exclusivamente con ese bloque. La producción registrada de corte propio se conserva como dato histórico para el análisis de inventario.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
-        for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
+        for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols"):
             st.session_state.pop(k,None)
         fitted={}
         progress=st.progress(0)
@@ -361,7 +359,6 @@ with t4:
         if st.session_state.get('refit_demands')!=refit_demands:
             st.session_state['refit_demands']=refit_demands
             st.session_state.pop('forecast',None)
-            st.session_state.pop('plan_preliminar',None)
         if protocols:
             for name,protocol in protocols.items():
                 mode=(". LSTM directa de 12 semanas, parámetros congelados. Reajuste final."
@@ -385,8 +382,6 @@ with t4:
                     else:
                         forecasts[name]=forecast_lstm_verified(fit,start,int(weeks))
                 st.session_state["forecast"]=make_forecast_table(forecasts)
-                st.session_state.pop("plan_preliminar",None)
-                st.session_state.pop("plan_signature",None)
                 st.success("Pronóstico generado.")
             except Exception as e:
                 st.error("No fue posible pronosticar: "+type(e).__name__+": "+str(e))
@@ -400,7 +395,7 @@ with t4:
                 "produccion_cp":"Producción CP histórica estimada","produccion_total_referencia":"Producción total de referencia"})
             numeric=list(show.columns)[2:]
             show[numeric]=show[numeric].round(2)
-            st.caption("Pronósticos puntuales, con dos decimales. El plan de fabricación realiza su propio redondeo a unidades enteras.")
+            st.caption("Pronósticos puntuales de demanda, con dos decimales. Los modelos PAP y PMP convertirán estas cantidades en decisiones de producción en unidades enteras.")
             if protocols:
                 weak=[n for n,p in protocols.items() if (p['test'].loc[p['test'].Modelo==p['selected'],'R²']<0).any()]
                 if weak:
@@ -412,65 +407,6 @@ with t4:
             fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
             st.plotly_chart(fig,use_container_width=True)
             st.caption("Producción total de referencia supone MQ producida igual a su demanda. Es una suma descriptiva no verificada, no demanda total ni capacidad requerida del plan.")
-            st.divider()
-            st.subheader("Plan preliminar de reposición de corte propio")
-            st.write("Diferente del pronóstico estadístico: calcula cantidades propuestas a partir de demanda, inventario y capacidad compartida.")
-            capacity_file=st.file_uploader("Cargar 03_CAPACIDADES.xlsx para restricciones por recurso",type=['xlsx'],key='capacity_file')
-            resources=None
-            capacity_digest=None
-            if capacity_file is not None:
-                try:
-                    capacity_payload=capacity_file.getvalue()
-                    resources,capacity_checks=read_capacity(capacity_payload)
-                    capacity_digest=sha256(capacity_payload).hexdigest()
-                    if not capacity_checks.coincide.all():
-                        st.warning("Hay diferencias entre capacidades guardadas y horas/tiempos. Se usan horas y tiempos; revisa la auditoría.")
-                    st.caption("Capacidad compartida por máquina y trabajador del Excel; las capacidades de ambas modalidades no se suman.")
-                    with st.expander('Auditoría de capacidad del Excel'):
-                        st.dataframe(capacity_checks,hide_index=True)
-                except Exception as e:
-                    st.error('No se pudo validar capacidad: '+str(e)); st.stop()
-            with st.expander("Supuestos de reposición y capacidad",expanded=True):
-                left,right=st.columns(2)
-                with left:
-                    recorded_stock=base['inventario_final_cp'].iloc[-1] if 'inventario_final_cp' in base else None
-                    stock_default=int(recorded_stock) if recorded_stock is not None and pd.notna(recorded_stock) and recorded_stock>=0 else None
-                    stock=st.number_input("Inventario CP disponible al inicio (unidades)",min_value=0,value=stock_default,step=1,
-                        help="Inicializado con el inventario final registrado en el Excel. Ajusta si el inventario físico disponible difiere.")
-                    wash=st.number_input("CP ya confeccionados, aún en lavado (recibir la primera semana)",min_value=0,value=0,step=10)
-                    cover=st.slider("Cobertura objetivo CP (semanas)",1,8,4)
-                    minlot=st.number_input("Lote CP mínimo orientativo",min_value=0,value=80,step=10)
-                with right:
-                    capacity=st.number_input("Capacidad base semanal equivalente a maquila",min_value=1,value=420,step=10,disabled=resources is not None)
-                    te_mq=st.number_input("TE maquila, min/unidad",min_value=0.01,value=22.04,step=0.01,disabled=resources is not None)
-                    te_cp=st.number_input("TE corte propio, min/unidad",min_value=0.01,value=35.16,step=0.01,disabled=resources is not None)
-                    cp_share=st.slider("Prioridad de capacidad para CP (%)",0,100,35,5,
-                        help="Porcentaje de capacidad CP que se prioriza antes de asignar MQ; CP también puede utilizar la holgura posterior.")
-            st.caption("Los valores por defecto son supuestos de escenario. Introduce el inventario físico y comprueba los tiempos estándar definitivos antes de usar el PMP.")
-            st.caption("La reposición supone ingreso a bodega una semana después de confección y lavado. Cobertura, cuota CP y lote mínimo son políticas editables, no capacidades medidas.")
-            plan=None
-            if st.button("Calcular plan preliminar",type="secondary",use_container_width=True):
-                try:
-                    plan=calcular_plan_reposicion(
-                        forecast,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,recursos=resources)
-                    st.session_state["plan_preliminar"]=plan
-                    st.session_state["plan_signature"]=(st.session_state.get("signature"),forecast_key,
-                        stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,capacity_digest)
-                except Exception as exc:
-                    st.error("No se pudo calcular el plan: "+str(exc))
-            keys=(st.session_state.get("signature"),forecast_key,stock,wash,capacity,te_mq,te_cp,cover,cp_share,minlot,capacity_digest)
-            if st.session_state.get("plan_signature")==keys:
-                plan=st.session_state.get("plan_preliminar")
-            if plan is not None:
-                st.dataframe(plan,hide_index=True,use_container_width=True)
-                left,right,third=st.columns(3)
-                left.metric("CP propuesta (horizonte)",int(plan["Producción CP propuesta"].sum()))
-                right.metric("Maquila pendiente al cierre",int(plan["Maquila pendiente al cierre"].iloc[-1]))
-                third.metric("Ventas CP no cubiertas",int(plan["Ventas CP no cubiertas"].sum()))
-                st.caption("Se comprueban recursos del Excel cuando está cargado. No se programa la secuencia de operaciones dentro de cada semana ni la capacidad externa de lavado. Una prioridad CP mayor puede desplazar maquila cuando los recursos están saturados; CP puede aprovechar holguras posteriores. Los lotes mínimos solo se señalan.")
-                st.download_button("Descargar plan preliminar (CSV)",
-                    data=plan.to_csv(index=False,sep=";").encode("utf-8-sig"),
-                    file_name="PLAN_PRELIMINAR_REPOSICION_CP.csv")
             buffer=BytesIO()
             try:
                 with pd.ExcelWriter(buffer,engine="openpyxl") as writer:
@@ -490,13 +426,6 @@ with t4:
                         pd.DataFrame([{'Serie':n,'Modelo':p['selected'],'Epocas':p['candidates'][p['selected']].epochs,
                                        'Smearing':p['candidates'][p['selected']].smear,'Sesgo_validacion':p.get('bias_correction',0.0),'Criterio':'RMSE de VALIDACIÓN a 12 semanas',
                                        'Refit':('Todo el historial, configuración congelada' if not n.startswith('Demanda') or refit_demands else 'Pesos elegidos en validación')} for n,p in protocols.items()]).to_excel(writer,sheet_name="SELECCION_FINAL",index=False)
-                    if plan is not None:
-                        plan.to_excel(writer,sheet_name="PLAN_REPOSICION",index=False)
-                        if resources is not None:
-                            resources.to_excel(writer,sheet_name='RECURSOS_CAPACIDAD',index=False)
-                            resource_loads(plan,resources).to_excel(writer,sheet_name='CARGA_RECURSOS',index=False)
-                    if plan is not None:
-                        plan.to_excel(writer,sheet_name="PLAN_PRELIMINAR",index=False)
                     metric_rows=[]
                     val_tables=[];test_tables=[]
                     for name,f in fits.items():

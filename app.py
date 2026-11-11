@@ -52,8 +52,6 @@ with st.sidebar:
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)
     units=st.select_slider("Unidades LSTM",options=[8,16,24,32,48,64],value=16)
     seed=st.number_input("Semilla",min_value=0,max_value=999999,value=42)
-    optional=st.checkbox("Incluir pronóstico estadístico de producción CP (complementario)",value=False,
-                         help="No es necesario para pronosticar las dos demandas ni para calcular la reposición. Actívalo solo si deseas analizar la producción histórica como serie independiente.")
     with st.expander("Detalles de evaluación",expanded=False):
         train=st.slider("Entrenamiento (%)",60,80,70,5)
         val=st.slider("Validación (%)",10,20,15,5)
@@ -94,7 +92,6 @@ try:
     base,zero_trace=confirm_pre_sales(base,confirm_zeros)
     inventory_audit=audit_inventory(base)
     names={"Demanda de maquila":"demanda_mq","Demanda de corte propio":"demanda_cp"}
-    if optional: names["Producción de corte propio"]="produccion_cp"
     series={name:extract_series(base,col) for name,col in names.items()}
 except Exception as e:
     st.error("No fue posible validar la base: "+str(e)); st.stop()
@@ -108,7 +105,7 @@ if use_validated:
     st.caption('El perfil histórico se conserva como diagnóstico. Las demandas principales usan la LSTM residual estacional v8 y se seleccionan exclusivamente con VALIDACIÓN.')
     if validated_config.get("test_previously_observed", False):
         st.warning("Nota metodológica: el bloque TEST de esta base ya fue consultado en iteraciones anteriores. Se mantiene fuera de la selección actual, pero debe interpretarse como un holdout reutilizado, no como una evaluación completamente independiente o ciega.")
-signature=sha256(b'lstm-v9-directa-contexto'+payload+repr(asdict(settings)).encode()+str((optional,confirm_zeros,use_validated)).encode()).hexdigest()
+signature=sha256(b'lstm-v9-directa-contexto'+payload+repr(asdict(settings)).encode()+str((False,confirm_zeros,use_validated)).encode()).hexdigest()
 if st.session_state.get("signature")!=signature:
     st.session_state["signature"]=signature
     for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
@@ -143,8 +140,8 @@ with st.expander("Datos y trazabilidad"):
 
 t1,t2,t_cv,t3,t4=st.tabs(["1. Entrenamiento","2. Validación","3. Validación cruzada","4. Prueba","5. Pronóstico y Excel"])
 with t1:
-    st.subheader("Entrenar LSTM de demanda y producción")
-    st.write("Las demandas se modelan con una LSTM directa de 12 horizontes, contexto estacional de 52 semanas y tres semillas. Se comparan dos arquitecturas mediante VALIDACIÓN y se calibra el sesgo exclusivamente con ese bloque. Producción CP es un análisis complementario.")
+    st.subheader("Entrenar LSTM de demanda")
+    st.write("Las demandas se modelan con una LSTM directa de 12 horizontes, contexto estacional de 52 semanas y tres semillas. Se comparan dos arquitecturas mediante VALIDACIÓN y se calibra el sesgo exclusivamente con ese bloque. La producción registrada de corte propio se conserva como dato histórico para el análisis de inventario.")
     if st.button("Entrenar modelos",type="primary",use_container_width=True):
         for k in ("fits","tests","protocol_test_results","forecast","cp_choice","demand_choice","protocols","plan_preliminar","plan_signature"):
             st.session_state.pop(k,None)
@@ -159,8 +156,6 @@ with t1:
                 progress.progress((i+1)/len(series))
             st.session_state["fits"]=fitted
             st.session_state["demand_choice"]=select_demand_by_validation(fitted["Demanda de corte propio"],min(int(weeks),12))
-            if optional:
-                st.session_state["cp_choice"]=select_by_validation(fitted["Producción de corte propio"])
             with st.spinner("Comparando candidatos a 12 semanas con validación temporal separada"):
                 st.session_state["protocols"]={name:(demand_from_fit(fitted[name]) if name.startswith("Demanda")
                                                else select_protocol(frame,True,settings))
@@ -197,7 +192,7 @@ with t2:
     else:
         if protocols:
             st.subheader("Validación de la LSTM seleccionada")
-            st.caption("Las demandas usan LSTM directa multihorizonte con contexto estacional. La arquitectura, épocas y calibración se determinan antes de TEST. Se comparan referencias de 48 y 52 semanas; producción CP sigue siendo complementaria.")
+            st.caption("Las demandas usan LSTM directa multihorizonte con contexto estacional. La arquitectura, épocas y calibración se determinan antes de TEST. Se comparan referencias de 48 y 52 semanas.")
             for name,protocol in protocols.items():
                 st.write(name+": "+protocol['selected'])
                 if name.startswith("Demanda"):
@@ -251,9 +246,6 @@ with t2:
                     st.markdown("**Métodos de demanda CP: pronóstico recursivo**")
                     st.dataframe(selected.comparison.round(3),hide_index=True,use_container_width=True)
                     st.caption("Las ventanas de validación se solapan y no equivalen a observaciones independientes.")
-                if optional and st.session_state.get("cp_choice") is not None:
-                    st.markdown("**Producción CP: métodos de producción intermitente**")
-                    st.dataframe(st.session_state["cp_choice"].comparison.round(3),hide_index=True,use_container_width=True)
                 loss=f.loss.rename(columns={"epoch":"Época","train_loss":"Entrenamiento","val_loss":"Validación"}).set_index("Época")
                 st.line_chart(loss)
 
@@ -380,9 +372,6 @@ with t4:
                 st.caption(name+": "+protocol['selected']+mode)
         elif selection:
             st.caption("Demanda CP: "+selection.method+" (elegido en validación del horizonte). Demanda MQ: LSTM.")
-        cp_choice=st.session_state.get("cp_choice")
-        if cp_choice is not None and not protocols:
-            st.caption("Producción CP: "+cp_choice.method+" (modelo elegido en validación; uso descriptivo).")
         if int(weeks)>12:
             st.warning("La comparación de modelos se validó hasta 12 semanas. Para horizontes mayores, realiza una evaluación específica.")
         if st.button("Generar pronóstico",type="primary",use_container_width=True):
@@ -393,10 +382,6 @@ with t4:
                         forecasts[name]=(future_seasonal_residual(protocols[name],start,int(weeks),refit=refit_demands) if name.startswith('Demanda') else future_search(protocols[name],start,int(weeks),refit=True)).rename(columns={'pronostico':fit.target})
                     elif name=="Demanda de corte propio" and selection:
                         forecasts[name]=forecast_demand_selected(fit,selection,start,int(weeks))
-                    elif name=="Producción de corte propio" and st.session_state.get("cp_choice") is not None and st.session_state["cp_choice"].method!="LSTM original":
-                        # La producción histórica no determina cantidades de planificación.
-                        dates=forecasts["Demanda de maquila"]["fecha_inicio"]
-                        forecasts[name]=forecast_intermitente(fit,st.session_state["cp_choice"],dates)
                     else:
                         forecasts[name]=forecast_lstm_verified(fit,start,int(weeks))
                 st.session_state["forecast"]=make_forecast_table(forecasts)
@@ -426,7 +411,6 @@ with t4:
                 fig.add_trace(go.Scatter(x=forecast.fecha_inicio,y=forecast[field],name=label,mode="lines+markers"))
             fig.update_layout(template="plotly_white",height=330,yaxis_title="Pantalones/semana")
             st.plotly_chart(fig,use_container_width=True)
-            st.caption("Producción CP estadística = predicción del comportamiento empírico histórico, NO una orden de fabricación. El cálculo de reposición siguiente utiliza demanda, inventario y capacidad.")
             st.caption("Producción total de referencia supone MQ producida igual a su demanda. Es una suma descriptiva no verificada, no demanda total ni capacidad requerida del plan.")
             st.divider()
             st.subheader("Plan preliminar de reposición de corte propio")
@@ -539,7 +523,7 @@ with t4:
                         ("Ventana",settings.lookback),("Épocas máximas",settings.epochs),("Unidades LSTM",settings.units),
                         ("Semilla",settings.seed),("Entrenamiento",train),("Validación",val),
                         ("Horizonte",int(weeks)),("Inicio plan",str(start)),
-                        ("Nota","Producción CP estimada es informativa; planificación requiere inventarios y capacidad.")],columns=["Dato","Valor"])
+                        ("Nota","Las cantidades planificadas requieren demanda, inventarios y capacidad; producción CP del histórico no se pronostica.")],columns=["Dato","Valor"])
                     meta.to_excel(writer,sheet_name="FICHA_TECNICA",index=False)
                     for ws in writer.book.worksheets:
                         ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions

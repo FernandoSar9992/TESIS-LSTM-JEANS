@@ -44,7 +44,7 @@ with st.sidebar:
     days_to_monday=(7-today_local.weekday())%7
     default_start=today_local+timedelta(days=days_to_monday or 7)
     start=st.date_input("Inicio del plan (lunes)",value=default_start,
-                        min_value=default_start,help="Se propone automáticamente el próximo lunes para evitar fechas de planificación vencidas.")
+                        help="Se propone automáticamente el próximo lunes, pero puedes seleccionar una fecha anterior (por ejemplo, 23/11/2026) para reproducir un pronóstico histórico.")
     st.caption("Ajustes de entrenamiento")
     look=st.number_input("Ventana histórica",min_value=4,max_value=24,value=12)
     ep=st.number_input("Épocas máximas",min_value=20,max_value=250,value=100,step=10)

@@ -92,6 +92,49 @@ with st.sidebar:
                 declared_real = st.checkbox("Confirmo que todos los registros cargados son observaciones reales", value=False, key="declared_real",
                                             help="Marca solo si no hay demandas estimadas o reconstruidas. Se conserva como declaración del usuario.")
 
+# Reproducción histórica: excluye TODAS las observaciones desde la fecha
+# seleccionada. No desplaza etiquetas ni utiliza demandas futuras al entrenar.
+with st.sidebar:
+    with st.expander("Reproducir pronóstico desde una fecha anterior"):
+        historical = st.checkbox("Activar corte histórico de datos", value=False, key="historical_cutoff_enabled",
+                                 help="Para reproducir el pronóstico del 23/11/2026, elige 23/11/2026. "
+                                      "Solo entrarán registros anteriores a ese día.")
+        if historical:
+            if is_workshop:
+                cutoff_source = raw
+                cutoff_dayfirst = True
+            else:
+                cutoff_source = selected_frame
+                cutoff_dayfirst = mode != "Fechas: mes/día/año"
+            dates = pd.to_datetime(cutoff_source[period_col], errors="coerce",
+                                   dayfirst=cutoff_dayfirst, format="mixed")
+            if dates.isna().any() or dates.empty:
+                st.error("El corte histórico requiere una columna con fechas reales. "
+                         "Si tu archivo usa etiquetas S1/S2, carga la versión histórica "
+                         "que termine antes de la semana que deseas pronosticar.")
+                st.stop()
+            # El selector no depende de la fecha actual ni de la última observación.
+            # Esto permite reproducir cortes anteriores de forma explícita.
+            default_cutoff = (dates.max() + pd.Timedelta(days=1)).date()
+            start_date = st.date_input("Primer día que quieres pronosticar",
+                                       value=default_cutoff, key="historical_forecast_start",
+                                       format="DD/MM/YYYY")
+            kept = dates < pd.Timestamp(start_date)
+            if kept.sum() < 30:
+                st.error(f"Solo quedan {int(kept.sum())} registros anteriores al corte. "
+                         "Se requiere suficiente historia para TRAIN, VALIDATION y TEST.")
+                st.stop()
+            excluded = int((~kept).sum())
+            if is_workshop:
+                raw = raw.loc[kept].copy()
+            else:
+                selected_frame = selected_frame.loc[kept].copy()
+            st.info(f"Corte histórico: {start_date:%d/%m/%Y}. "
+                    f"Se excluyeron {excluded} filas en esa fecha o posteriores. "
+                    "Las métricas se recalcularán para este corte: pueden diferir de la ejecución original.")
+            st.caption("Reproducción retrospectiva para documentar el modelo; repetir o elegir "
+                       "configuraciones tras conocer TEST no constituye una nueva prueba independiente.")
+
 if is_workshop:
     from workshop_app import render_workshop
     workshop_mapping.update(period=period_col, target=demand_col)

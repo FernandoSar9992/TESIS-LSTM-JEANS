@@ -1,6 +1,7 @@
 """Evaluación cronológica de un paso, trazabilidad y TEST final congelado."""
 from dataclasses import dataclass, asdict, replace
 from hashlib import sha256
+import gc
 import random
 
 import numpy as np
@@ -271,27 +272,38 @@ def run_thesis(data, config, future_periods=None, progress=None, evaluate_test=T
     tf.keras.utils.set_random_seed(config.seed)
     tf.keras.backend.clear_session()
     notify = progress or (lambda message: None)
-    rows, fold_rows, best, best_key, selected = [], [], None, None, None
+    rows, fold_rows, best_key, selected = [], [], None, None
     for number, candidate in enumerate(options, 1):
         scores = []
         for cut, (fit_end, stop) in enumerate(folds, 1):
             notify(f"LSTM {number}/{len(options)} · {candidate['representation']} · ventana {candidate['lookback']} · {candidate['units']} unidades · corte {cut}/{len(folds)}")
             fitted = fit_candidate(y, data, fit_end, stop, candidate, config, config.seed)
-            scores.append(fitted)
+            # Guardar solo métricas de búsqueda, nunca las redes de cortes descartados.
+            # Dejar referencias a decenas de modelos agota la RAM de Streamlit Cloud.
+            compact = {"scope": fitted["scope"], "eligible": fitted["eligible"],
+                       "scores": fitted["scores"], "epochs": fitted["epochs"]}
+            scores.append(compact)
             fold_rows.append({"Variante": number, "Corte": cut, "Train_fin": fit_end, "Validacion_fin": stop,
-                              "Alcance": fitted["scope"], "Epocas": fitted["epochs"], **fitted["scores"]})
-        usable = [s for s in scores if s["eligible"]] or scores
-        mae = float(np.mean([s["scores"]["MAE"] for s in usable]))
-        rmse = float(np.mean([s["scores"]["RMSE"] for s in usable]))
-        scopes = {s["scope"] for s in usable}
+                              "Alcance": compact["scope"], "Epocas": compact["epochs"], **compact["scores"]})
+            del fitted
+            tf.keras.backend.clear_session()
+            gc.collect()
+        usable = [score for score in scores if score["eligible"]] or scores
+        mae = float(np.mean([score["scores"]["MAE"] for score in usable]))
+        rmse = float(np.mean([score["scores"]["RMSE"] for score in usable]))
+        scopes = {score["scope"] for score in usable}
         scope = next(iter(scopes)) if len(scopes) == 1 else "REAL_Y_SIN_TRAZABILIDAD"
-        rows.append({"Variante": number, **candidate, "epochs": fitted["epochs"], "MAE_validacion": mae, "RMSE_validacion": rmse,
+        selected_epochs = scores[-1]["epochs"]
+        rows.append({"Variante": number, **candidate, "epochs": selected_epochs, "MAE_validacion": mae, "RMSE_validacion": rmse,
                      "Cortes_utilizados": len(usable), "Alcance": scope})
         if best_key is None or (rmse, mae) < best_key:
-            best_key, best = (rmse, mae), fitted
-            selected = {**candidate, "epochs": fitted["epochs"], "Variante": number, "selection_scope": scope}
-    # Modelo del último corte ya ajustado exclusivamente en TRAIN. No se reajusta
-    # ni el scaler ni los pesos con VALIDATION/TEST.
+            best_key = (rmse, mae)
+            selected = {**candidate, "epochs": selected_epochs, "Variante": number, "selection_scope": scope}
+    # Reconstruir UNA vez la red ganadora en el último corte TRAIN/VALIDATION.
+    # La misma semilla/configuración conserva el protocolo de evaluación; no usa TEST.
+    # Evita retener modelos de 33 variantes x hasta 3 cortes.
+    notify("Reconstruyendo la red seleccionada con el corte final de TRAIN/VALIDATION")
+    best = fit_candidate(y, data, tr, va, selected, config, config.seed)
     models = [best["model"]]
     for member in range(1, config.members):
         notify(f"Entrenamiento adicional LSTM {member+1}/{config.members}, solo TRAIN")
